@@ -52,16 +52,50 @@ small{color:#9aa3b2}progress{width:100%}li{list-style:none;margin:8px 0}ul{paddi
 
 # ---------- utilitaires ----------
 
+IP_FORCEE = os.environ.get("MIROIR_IP")
+# Interfaces qui ne sont pas le Wi-Fi/Ethernet local (VPN, conteneurs, ponts virtuels).
+INTERFACES_VIRTUELLES = ("lo", "tun", "tap", "wg", "tailscale", "zt", "docker", "br-",
+                         "veth", "virbr", "vmnet", "vboxnet", "ppp")
+
+
+def ip_interfaces():
+    """Adresses IPv4 des interfaces réseau physiques, Wi-Fi et Ethernet d'abord."""
+    if not shutil.which("ip"):
+        return []
+    adresses = []
+    for ligne in executer(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                          sortie=True).decode(errors="replace").splitlines():
+        morceaux = ligne.split()
+        if len(morceaux) < 4 or morceaux[2] != "inet":
+            continue
+        interface, adresse = morceaux[1], morceaux[3].split("/")[0]
+        if interface.startswith(INTERFACES_VIRTUELLES):
+            continue
+        priorite = 0 if interface.startswith(("wl", "en", "eth")) else 1
+        adresses.append((priorite, adresse))
+    return [a for _, a in sorted(adresses)]
+
+
 def ip_locale():
-    """Adresse IP de la machine sur le réseau local."""
+    """Adresse IP du PC sur le réseau local (celle mise dans le QR et le certificat).
+
+    --ip ou MIROIR_IP l'imposent ; sinon on préfère une interface Wi-Fi/Ethernet,
+    pour ne pas annoncer l'adresse d'un VPN que le téléphone ne peut pas joindre.
+    """
+    if IP_FORCEE:
+        return IP_FORCEE
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("10.255.255.255", 1))  # aucun paquet n'est envoyé
-        return s.getsockname()[0]
+        par_route = s.getsockname()[0]
     except OSError:
-        return "127.0.0.1"
+        par_route = None
     finally:
         s.close()
+    physiques = ip_interfaces()
+    if physiques and par_route not in physiques:
+        return physiques[0]
+    return par_route or "127.0.0.1"
 
 
 def qr_terminal(donnees):
@@ -153,13 +187,18 @@ def recevoir_corps(gestionnaire, dossier, nom):
     """Écrit le corps de la requête dans le dossier. Renvoie le chemin, ou None si incomplet."""
     reste = int(gestionnaire.headers.get("Content-Length", 0))
     chemin, sortie = creer_fichier_libre(dossier, nom)
-    with sortie:
-        while reste > 0:
-            bloc = gestionnaire.rfile.read(min(reste, 1 << 20))
-            if not bloc:
-                break
-            sortie.write(bloc)
-            reste -= len(bloc)
+    try:
+        with sortie:
+            while reste > 0:
+                bloc = gestionnaire.rfile.read(min(reste, 1 << 20))
+                if not bloc:
+                    break
+                sortie.write(bloc)
+                reste -= len(bloc)
+    except OSError:
+        # Connexion coupée ou disque plein : on ne laisse pas de fichier tronqué.
+        os.remove(chemin)
+        return None
     if reste:
         os.remove(chemin)
         return None
@@ -1127,6 +1166,7 @@ def options_hub(p, https=False):
 def main():
     p = argparse.ArgumentParser(prog="miroir", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--ip", help="adresse du PC à mettre dans le QR (si la détection se trompe, ex. avec un VPN)")
     sous = p.add_subparsers(dest="commande", required=True)
 
     h = sous.add_parser("hub", help="tout-en-un : fichiers, presse-papiers, télécommande, notifications")
@@ -1177,6 +1217,9 @@ def main():
     t.set_defaults(fn=cmd_tv)
 
     args = p.parse_args()
+    if args.ip:
+        global IP_FORCEE
+        IP_FORCEE = args.ip
     args.fn(args)
 
 

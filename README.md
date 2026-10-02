@@ -149,7 +149,8 @@ Ajoutez `-o fichier.png` ou `-o fichier.svg` pour enregistrer une image.
 Sert l'écran TV de Miroir (partie 1) depuis ce PC et ouvre le navigateur.
 En HTTP le téléphone peut seulement envoyer des fichiers ; `miroir tv --https`
 active la caméra et le partage d'écran (certificat auto-signé à accepter).
-`Ctrl+C` arrête chaque commande ; `-p PORT` change le port.
+`Ctrl+C` arrête chaque commande ; `-p PORT` change le port. Si le QR affiche une
+mauvaise adresse (VPN actif…), imposez-la : `miroir --ip 192.168.1.20 hub`.
 
 ## Fichiers
 

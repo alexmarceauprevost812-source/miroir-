@@ -64,9 +64,17 @@ $('btnEcran').addEventListener('click', async () => {
 });
 
 $('btnCamera').addEventListener('click', async () => {
+  const video = { facingMode: 'environment' };
+  let flux;
   try {
-    envoyer(await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true }));
-  } catch (e) { etat('Accès à la caméra refusé.'); }
+    flux = await navigator.mediaDevices.getUserMedia({ video, audio: true });
+  } catch (e) {
+    // Micro refusé ou absent : on partage quand même l'image seule.
+    try { flux = await navigator.mediaDevices.getUserMedia({ video, audio: false }); } catch (e2) {
+      return etat('Accès à la caméra refusé.');
+    }
+  }
+  envoyer(flux);
 });
 
 $('btnStop').addEventListener('click', () => { arreter(); etat('Partage arrêté.'); });

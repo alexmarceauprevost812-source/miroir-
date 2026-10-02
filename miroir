@@ -722,10 +722,14 @@ def gestionnaire_hub(hub):
             return self.rfile.read(n)
 
         def corps_json(self):
+            """Objet JSON du corps, ou None s'il est invalide ou n'est pas un objet.
+            Un corps trop grand lève ValueError (réponse 413)."""
+            brut = self.corps()
             try:
-                return json.loads(self.corps() or b"{}")
+                donnees = json.loads(brut or b"{}")
             except (ValueError, UnicodeDecodeError):
-                return {}
+                return None
+            return donnees if isinstance(donnees, dict) else None
 
         # --- connexion par QR : le jeton du QR devient un cookie ---
         def jeton_requete(self):
@@ -814,6 +818,8 @@ def gestionnaire_hub(hub):
                 donnees = self.corps_json()
             except ValueError:
                 return self.json({"erreur": "requête trop grande"}, 413)
+            if donnees is None:
+                return self.json({"ok": False, "erreur": "JSON attendu : un objet"}, 400)
             if chemin == "/api/presse-papiers":
                 texte = str(donnees.get("texte", ""))
                 if not hub.presse_papiers.ecrire(texte):

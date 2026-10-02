@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""miroir — partager des fichiers entre Linux et un téléphone avec un code QR.
+
+  miroir envoyer FICHIER...      Linux -> téléphone : le téléphone scanne et télécharge
+  miroir recevoir [-d DOSSIER]   téléphone -> Linux : le téléphone scanne et envoie
+  miroir tv                      ouvre l'écran TV de Miroir (code QR pour le téléphone)
+
+Le téléphone et l'ordinateur doivent être sur le même réseau Wi-Fi.
+"""
+
+import argparse
+import html
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import urllib.parse
+import webbrowser
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+DOSSIER_APP = os.path.dirname(os.path.realpath(__file__))
+
+STYLE = """<meta name="viewport" content="width=device-width, initial-scale=1"><style>
+body{margin:0;background:#0f1115;color:#f2f2f2;font-family:system-ui,sans-serif;padding:16px}
+h1{font-size:1.6rem}a,button,label.b{display:block;background:#4f8cff;color:#fff;padding:14px;border-radius:10px;
+text-decoration:none;margin:10px 0;font-size:1.05rem;border:0;text-align:center;word-break:break-all}
+small{color:#9aa3b2}progress{width:100%}li{list-style:none;margin:8px 0}ul{padding:0}</style>"""
+
+
+def ip_locale():
+    """Adresse IP de la machine sur le réseau local."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))  # aucun paquet n'est envoyé
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def afficher_qr(url):
+    """Affiche un code QR dans le terminal (qrencode, ou le module python qrcode)."""
+    print()
+    if shutil.which("qrencode"):
+        subprocess.run(["qrencode", "-t", "ansiutf8", "-m", "2", url])
+    else:
+        try:
+            import qrcode
+            qr = qrcode.QRCode(border=2)
+            qr.add_data(url)
+            qr.print_ascii(invert=True)
+        except ImportError:
+            print("  (Pour voir le code QR ici : sudo apt install qrencode)")
+    print(f"\n  Scannez le code QR ou ouvrez : \033[1m{url}\033[0m")
+    print("  Ctrl+C pour arrêter.\n")
+
+
+def taille(o):
+    for unite in ("o", "Ko", "Mo", "Go"):
+        if o < 1024 or unite == "Go":
+            return f"{o:.0f} {unite}" if unite == "o" else f"{o:.1f} {unite}"
+        o /= 1024
+
+
+def lancer(gestionnaire, port, chemin=""):
+    serveur = ThreadingHTTPServer(("0.0.0.0", port), gestionnaire)
+    url = f"http://{ip_locale()}:{serveur.server_address[1]}/{chemin}"
+    afficher_qr(url)
+    try:
+        serveur.serve_forever()
+    except KeyboardInterrupt:
+        print("\nArrêté.")
+    return url
+
+
+# ---------- envoyer : Linux -> téléphone ----------
+
+def cmd_envoyer(args):
+    fichiers = []
+    for chemin in args.fichiers:
+        if os.path.isdir(chemin):
+            for racine, _, noms in os.walk(chemin):
+                fichiers += [os.path.join(racine, n) for n in sorted(noms)]
+        elif os.path.isfile(chemin):
+            fichiers.append(chemin)
+        else:
+            sys.exit(f"miroir: fichier introuvable : {chemin}")
+    if not fichiers:
+        sys.exit("miroir: aucun fichier à envoyer")
+
+    class Envoi(SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                liens = "".join(
+                    f'<a href="/f/{i}">⬇ {html.escape(os.path.basename(f))} '
+                    f"<small>({taille(os.path.getsize(f))})</small></a>"
+                    for i, f in enumerate(fichiers))
+                corps = f"<!doctype html><meta charset=utf-8><title>Miroir</title>{STYLE}" \
+                        f"<h1>Miroir — fichiers partagés</h1>{liens}"
+                self.envoyer_texte(corps)
+            elif self.path.startswith("/f/"):
+                try:
+                    f = fichiers[int(self.path[3:])]
+                except (ValueError, IndexError):
+                    return self.send_error(404)
+                nom = os.path.basename(f)
+                self.send_response(200)
+                self.send_header("Content-Type", self.guess_type(f))
+                self.send_header("Content-Length", str(os.path.getsize(f)))
+                self.send_header("Content-Disposition",
+                                 "attachment; filename*=UTF-8''" + urllib.parse.quote(nom))
+                self.end_headers()
+                with open(f, "rb") as source:
+                    shutil.copyfileobj(source, self.wfile)
+                print(f"  ✓ téléchargé par {self.client_address[0]} : {nom}")
+            else:
+                self.send_error(404)
+
+        def envoyer_texte(self, corps):
+            donnees = corps.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(donnees)))
+            self.end_headers()
+            self.wfile.write(donnees)
+
+    print(f"Partage de {len(fichiers)} fichier(s).")
+    lancer(Envoi, args.port)
+
+
+# ---------- recevoir : téléphone -> Linux ----------
+
+PAGE_RECEVOIR = """<!doctype html><meta charset=utf-8><title>Miroir</title>""" + STYLE + """
+<h1>Miroir — envoyer vers l'ordinateur</h1>
+<label class=b>📁 Choisir des fichiers<input id=f type=file multiple hidden></label>
+<ul id=l></ul>
+<script>
+f.onchange = async () => {
+  for (const x of [...f.files]) {
+    const li = document.createElement('li');
+    li.innerHTML = '<span></span><progress max=1 value=0></progress>';
+    li.firstChild.textContent = x.name;
+    l.prepend(li);
+    await new Promise((ok) => {
+      const r = new XMLHttpRequest();
+      r.open('PUT', '/envoi?nom=' + encodeURIComponent(x.name));
+      r.upload.onprogress = (e) => { li.lastChild.value = e.loaded / e.total; };
+      r.onload = () => { li.firstChild.textContent += r.status === 200 ? ' ✅' : ' ❌'; ok(); };
+      r.onerror = () => { li.firstChild.textContent += ' ❌'; ok(); };
+      r.send(x);
+    });
+  }
+  f.value = '';
+};
+</script>"""
+
+
+def nom_libre(dossier, nom):
+    nom = os.path.basename(nom.replace("\\", "/")).strip() or "fichier"
+    base, ext = os.path.splitext(nom)
+    chemin, n = os.path.join(dossier, nom), 1
+    while os.path.exists(chemin):
+        chemin = os.path.join(dossier, f"{base} ({n}){ext}")
+        n += 1
+    return chemin
+
+
+def cmd_recevoir(args):
+    dossier = os.path.abspath(args.dossier)
+    os.makedirs(dossier, exist_ok=True)
+
+    class Reception(SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            donnees = PAGE_RECEVOIR.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(donnees)))
+            self.end_headers()
+            self.wfile.write(donnees)
+
+        def do_PUT(self):
+            url = urllib.parse.urlparse(self.path)
+            if url.path != "/envoi":
+                return self.send_error(404)
+            nom = urllib.parse.parse_qs(url.query).get("nom", ["fichier"])[0]
+            reste = int(self.headers.get("Content-Length", 0))
+            chemin = nom_libre(dossier, nom)
+            with open(chemin, "wb") as sortie:
+                while reste > 0:
+                    bloc = self.rfile.read(min(reste, 1 << 20))
+                    if not bloc:
+                        break
+                    sortie.write(bloc)
+                    reste -= len(bloc)
+            if reste:
+                os.remove(chemin)
+                return self.send_error(400, "envoi incomplet")
+            print(f"  ✓ reçu : {chemin} ({taille(os.path.getsize(chemin))})")
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    print(f"Les fichiers reçus seront enregistrés dans : {dossier}")
+    lancer(Reception, args.port)
+
+
+# ---------- tv : sert l'application web Miroir ----------
+
+def cmd_tv(args):
+    class App(SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=DOSSIER_APP, **k)
+
+        def log_message(self, *a):
+            pass
+
+    serveur = ThreadingHTTPServer(("0.0.0.0", args.port), App)
+    url = f"http://{ip_locale()}:{serveur.server_address[1]}/index.html"
+    if args.signal:
+        url += "?signal=" + urllib.parse.quote(args.signal, safe="")
+    print("Écran TV de Miroir. Ouvrez cette adresse dans le navigateur de la TV :")
+    afficher_qr(url)
+    if not args.sans_navigateur:
+        webbrowser.open(url)
+    try:
+        serveur.serve_forever()
+    except KeyboardInterrupt:
+        print("\nArrêté.")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="miroir", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sous = p.add_subparsers(dest="commande", required=True)
+
+    e = sous.add_parser("envoyer", help="envoyer des fichiers de Linux vers le téléphone")
+    e.add_argument("fichiers", nargs="+", help="fichiers ou dossiers")
+    e.add_argument("-p", "--port", type=int, default=8080)
+    e.set_defaults(fn=cmd_envoyer)
+
+    r = sous.add_parser("recevoir", help="recevoir des fichiers du téléphone sur Linux")
+    r.add_argument("-d", "--dossier", default=os.path.expanduser("~/Téléchargements/miroir"))
+    r.add_argument("-p", "--port", type=int, default=8080)
+    r.set_defaults(fn=cmd_recevoir)
+
+    t = sous.add_parser("tv", help="ouvrir l'écran TV de Miroir depuis ce PC")
+    t.add_argument("-p", "--port", type=int, default=8080)
+    t.add_argument("--signal", help="serveur PeerJS perso (ex. http://192.168.1.10:9000/miroir)")
+    t.add_argument("--sans-navigateur", action="store_true", help="ne pas ouvrir le navigateur")
+    t.set_defaults(fn=cmd_tv)
+
+    args = p.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

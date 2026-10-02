@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Miroir – Écran TV</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="tv">
+  <main id="attente" class="centre">
+    <h1>Miroir</h1>
+    <p>Scannez ce code QR avec votre téléphone pour afficher son écran
+      ou envoyer des photos, vidéos et fichiers sur la TV.</p>
+    <div id="qr" class="qr"></div>
+    <p class="code">Code : <strong id="code">…</strong></p>
+    <p id="lien" class="petit"></p>
+    <p id="etat" class="etat">Connexion au serveur…</p>
+  </main>
+  <video id="video" autoplay playsinline muted hidden></video>
+  <button id="son" class="flottant" hidden>Activer le son</button>
+
+  <div id="reception" class="reception" hidden></div>
+
+  <section id="visionneuse" class="visionneuse" hidden>
+    <div id="contenu" class="contenu"></div>
+    <div class="barre">
+      <span id="titre"></span>
+      <button id="precedent">◀</button>
+      <button id="suivant">▶</button>
+      <a id="telecharger" class="bouton" download>Télécharger</a>
+      <button id="fermer">✕ Fermer</button>
+    </div>
+  </section>
+
+  <aside id="recus" class="recus" hidden>
+    <h2>Fichiers reçus</h2>
+    <ul id="listeRecus" class="liste"></ul>
+  </aside>
+
+  <script src="lib/peerjs.min.js"></script>
+  <script src="commun.js"></script>
+  <script src="lib/qrcode.min.js"></script>
+  <script src="tv.js"></script>
+</body>
+</html>

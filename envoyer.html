@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Miroir – Téléphone</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="tel">
+  <main class="centre">
+    <h1>Miroir</h1>
+    <p id="etat" class="etat">Connexion…</p>
+
+    <label class="champ">Code de la TV
+      <input id="code" inputmode="text" autocomplete="off" placeholder="ex. AB12CD">
+    </label>
+
+    <div class="boutons">
+      <button id="btnEcran">📱 Partager mon écran</button>
+      <button id="btnCamera">📷 Partager la caméra</button>
+      <label class="bouton">📁 Envoyer des fichiers
+        <input id="fichier" type="file" multiple hidden>
+      </label>
+      <button id="btnStop" class="danger" hidden>⏹ Arrêter</button>
+    </div>
+
+    <p id="avertissement" class="petit" hidden>
+      Ce navigateur ne permet pas de capturer l'écran du téléphone
+      (limitation d'Android/iOS dans les navigateurs). Utilisez la caméra,
+      envoyez vos photos/vidéos/fichiers, ou ouvrez cette page sur un ordinateur.
+    </p>
+
+    <video id="apercu" autoplay playsinline muted></video>
+    <ul id="envois" class="liste"></ul>
+  </main>
+
+  <script src="lib/peerjs.min.js"></script>
+  <script src="commun.js"></script>
+  <script src="envoyer.js"></script>
+</body>
+</html>

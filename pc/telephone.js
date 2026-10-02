@@ -265,7 +265,7 @@ async function demarrerWebcam() {
   await apercu.play().catch(() => {});
   webcamActive = true;
   $('webcamGo').textContent = '⏹ Arrêter la webcam';
-  try { verrouEcran = await navigator.wakeLock.request('screen'); } catch (e) { /* facultatif */ }
+  await verrouillerEcran();
   boucleWebcam();
 }
 
@@ -279,6 +279,15 @@ function arreterWebcam() {
   $('webcamInfo').textContent = '';
   if (verrouEcran) verrouEcran.release().catch(() => {});
   verrouEcran = null;
+}
+
+// Garde l'écran allumé ; le navigateur relâche le verrou quand la page est masquée.
+async function verrouillerEcran() {
+  try {
+    const verrou = await navigator.wakeLock.request('screen');
+    verrou.addEventListener('release', () => { if (verrouEcran === verrou) verrouEcran = null; });
+    verrouEcran = verrou;
+  } catch (e) { /* facultatif */ }
 }
 
 async function boucleWebcam() {
@@ -315,9 +324,7 @@ async function boucleWebcam() {
 
 $('webcamGo').addEventListener('click', () => (webcamActive ? arreterWebcam() : demarrerWebcam()));
 document.addEventListener('visibilitychange', async () => {
-  if (webcamActive && document.visibilityState === 'visible' && !verrouEcran) {
-    try { verrouEcran = await navigator.wakeLock.request('screen'); } catch (e) { /* facultatif */ }
-  }
+  if (webcamActive && document.visibilityState === 'visible' && !verrouEcran) await verrouillerEcran();
 });
 
 // ---------- notifications ----------

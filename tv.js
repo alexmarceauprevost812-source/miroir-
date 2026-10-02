@@ -37,6 +37,13 @@ son.addEventListener('click', () => {
 });
 
 function demarrer() {
+  // Un QR vers file:// est inutilisable par le téléphone : il faut une adresse web.
+  if (location.protocol === 'file:') {
+    $('qr').hidden = true;
+    $('etat').textContent = 'Ouvrez cette page par une adresse web (GitHub Pages, ou « miroir tv --https » sur le PC) : '
+      + 'le téléphone ne peut pas lire un fichier local.';
+    return;
+  }
   const code = nouveauCode();
   const peer = new Peer(PREFIXE + code, optionsPeer());
 

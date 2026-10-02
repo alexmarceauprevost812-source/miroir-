@@ -90,8 +90,12 @@ function ouvrirConnexion(code) {
 }
 
 function attendreTampon(c) {
-  return new Promise((ok) => {
-    const verifier = () => (c.dataChannel.bufferedAmount < TAMPON_MAX ? ok() : setTimeout(verifier, 30));
+  return new Promise((ok, echec) => {
+    const verifier = () => {
+      if (!c.open || c.dataChannel.readyState !== 'open') return echec(new Error('connexion fermée'));
+      if (c.dataChannel.bufferedAmount < TAMPON_MAX) return ok();
+      setTimeout(verifier, 30);
+    };
     verifier();
   });
 }

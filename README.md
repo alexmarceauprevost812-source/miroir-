@@ -5,7 +5,9 @@ documents…) en **scannant un code QR**. Aucun compte, aucune appli à installe
 
 ## 1. Sur la TV (navigateur web)
 
-1. Ouvrez `index.html` dans le navigateur de la TV (ou d'un PC branché à la TV).
+1. Ouvrez la page `index.html` **par une adresse web** dans le navigateur de la TV
+   (GitHub Pages, ou `miroir tv --https` sur le PC). Un fichier ouvert directement
+   (`file://`) ne marche pas : le téléphone ne peut pas y accéder.
 2. Un **code QR** et un code à 6 lettres s'affichent.
 3. Scannez le QR avec le téléphone : la page `envoyer.html` s'ouvre, déjà reliée à la TV.
 
@@ -126,6 +128,8 @@ Ajoutez `-o fichier.png` ou `-o fichier.svg` pour enregistrer une image.
 ### `miroir tv`
 
 Sert l'écran TV de Miroir (partie 1) depuis ce PC et ouvre le navigateur.
+En HTTP le téléphone peut seulement envoyer des fichiers ; `miroir tv --https`
+active la caméra et le partage d'écran (certificat auto-signé à accepter).
 `Ctrl+C` arrête chaque commande ; `-p PORT` change le port.
 
 ## Fichiers

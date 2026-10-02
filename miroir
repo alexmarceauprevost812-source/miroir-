@@ -956,11 +956,22 @@ def cmd_tv(args):
         def log_message(self, *a):
             pass
 
-    serveur = ThreadingHTTPServer(("0.0.0.0", args.port), App)
-    url = f"http://{ip_locale()}:{serveur.server_address[1]}/index.html"
+    serveur = ServeurHub(("0.0.0.0", args.port), App)
+    if args.https:
+        contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        contexte.load_cert_chain(*certificat())
+        serveur.socket = contexte.wrap_socket(serveur.socket, server_side=True,
+                                              do_handshake_on_connect=False)
+    schema = "https" if args.https else "http"
+    url = f"{schema}://{ip_locale()}:{serveur.server_address[1]}/index.html"
     if args.signal:
         url += "?signal=" + urllib.parse.quote(args.signal, safe="")
     print("Écran TV de Miroir. Ouvrez cette adresse dans le navigateur de la TV :")
+    if args.https:
+        print("  Certificat auto-signé : acceptez l'avertissement sur la TV et sur le téléphone.")
+    else:
+        print("  \033[33m✗\033[0m En HTTP, le téléphone ne peut envoyer que des fichiers : la caméra et le\n"
+              "    partage d'écran exigent HTTPS (« miroir tv --https »).")
     afficher_qr(url)
     if not args.sans_navigateur:
         webbrowser.open(url)
@@ -1037,6 +1048,7 @@ def main():
     t.add_argument("-p", "--port", type=int, default=8080)
     t.add_argument("--signal", help="serveur PeerJS perso (ex. http://192.168.1.10:9000/miroir)")
     t.add_argument("--sans-navigateur", action="store_true", help="ne pas ouvrir le navigateur")
+    t.add_argument("--https", action="store_true", help="HTTPS (caméra et partage d'écran du téléphone)")
     t.set_defaults(fn=cmd_tv)
 
     args = p.parse_args()

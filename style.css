@@ -42,3 +42,10 @@ button:disabled { opacity:.5; }
 .barre button,.barre .bouton { padding:10px 14px; text-decoration:none; }
 button:focus-visible,.bouton:focus-visible { outline:3px solid #fff; outline-offset:2px; }
 @media (max-width:700px) { .recus { left:8px; right:8px; width:auto; top:auto; max-height:40%; } }
+
+/* Logo « Miroir » en lettres rouges en relief 3D */
+.logo { font-size:3.2rem; font-weight:900; letter-spacing:.06em; text-transform:uppercase; color:#e3242b;
+  transform:perspective(400px) rotateX(18deg);
+  text-shadow:0 1px 0 #c81e24,0 2px 0 #b51a20,0 3px 0 #a1171c,0 4px 0 #8e1418,0 5px 0 #7a0d12,
+    0 6px 1px rgba(0,0,0,.35),0 0 6px rgba(227,36,43,.35),0 8px 6px rgba(0,0,0,.45),0 14px 16px rgba(0,0,0,.4); }
+.tv .logo { font-size:4.5rem; }

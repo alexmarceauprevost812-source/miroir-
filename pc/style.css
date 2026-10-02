@@ -1,0 +1,77 @@
+:root {
+  --fond: #0f1115; --carte: #1b1e25; --texte: #f2f2f2; --gris: #9aa3b2;
+  --accent: #4f8cff; --secondaire: #2a2f3a; --rouge: #e3242b; --rouge-fonce: #7a0d12;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--fond); color: var(--texte);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+body { padding: 0 16px 32px; max-width: 34rem; margin: 0 auto; }
+
+header { display: flex; flex-direction: column; align-items: center; padding: 18px 0 6px; }
+
+/* Logo « Miroir » en lettres rouges en relief 3D */
+.logo {
+  margin: 0; font-size: 3rem; font-weight: 900; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--rouge); transform: perspective(400px) rotateX(18deg);
+  text-shadow:
+    0 1px 0 #c81e24, 0 2px 0 #b51a20, 0 3px 0 #a1171c, 0 4px 0 #8e1418,
+    0 5px 0 var(--rouge-fonce), 0 6px 1px rgba(0,0,0,.35), 0 0 6px rgba(227,36,43,.35),
+    0 8px 6px rgba(0,0,0,.45), 0 14px 16px rgba(0,0,0,.4);
+}
+
+nav { position: sticky; top: 0; z-index: 2; display: flex; gap: 4px; padding: 8px 0;
+  background: var(--fond); overflow-x: auto; }
+nav button { flex: 1; min-width: 4.2rem; display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: 8px 4px; font-size: 1.2rem; background: var(--carte); }
+nav button span { font-size: .7rem; color: var(--gris); }
+nav button[aria-current="page"] { background: var(--rouge); }
+nav button[aria-current="page"] span { color: #fff; }
+
+h2 { font-size: 1.05rem; margin: 22px 0 10px; color: var(--gris); font-weight: 600; }
+.petit { color: var(--gris); font-size: .88rem; }
+code { background: var(--carte); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+code.bloc { display: block; padding: 10px; margin: 8px 0; }
+
+button, .bouton { font: inherit; font-size: 1rem; padding: 13px 10px; border: 0; border-radius: 10px;
+  background: var(--accent); color: #fff; cursor: pointer; text-align: center; display: block;
+  -webkit-tap-highlight-color: transparent; user-select: none; }
+button:active { transform: scale(.97); filter: brightness(1.15); }
+button:disabled { opacity: .45; }
+.secondaire { background: var(--secondaire); }
+.plein { width: 100%; margin-top: 8px; }
+.gros { font-size: 1.15rem; padding: 26px 10px; }
+button:focus-visible, .bouton:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+
+input, select, textarea { font: inherit; font-size: 1rem; width: 100%; padding: 11px; border-radius: 10px;
+  border: 1px solid #333a47; background: var(--carte); color: var(--texte); }
+textarea { resize: vertical; }
+form > * + * { margin-top: 8px; }
+.ligne { display: flex; gap: 8px; } .ligne > * + * { margin-top: 0; }
+.ligne input { flex: 1; } .ligne button { flex: none; }
+.champ { display: flex; flex-direction: column; gap: 6px; color: var(--gris); font-size: .9rem; margin-top: 10px; }
+.champ input[type=range] { padding: 0; }
+
+.grille, .grille2, .grille3, .grille4 { display: grid; gap: 8px; margin-top: 8px; }
+.grille, .grille2 { grid-template-columns: 1fr 1fr; }
+.grille3 { grid-template-columns: repeat(3, 1fr); }
+.grille4 { grid-template-columns: repeat(4, 1fr); }
+
+.liste { list-style: none; padding: 0; margin: 10px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.liste li { background: var(--carte); border-radius: 10px; padding: 10px 12px; word-break: break-all; }
+.liste li a { color: var(--texte); text-decoration: none; display: flex; justify-content: space-between; gap: 8px; }
+.liste li a small { color: var(--gris); white-space: nowrap; }
+.liste progress { width: 100%; margin-top: 6px; }
+.liste li.ok span::after { content: " ✅"; } .liste li.erreur span::after { content: " ❌"; }
+
+.pave { height: 15rem; border-radius: 14px; background: var(--carte); border: 1px dashed #3a4150;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  color: var(--gris); text-align: center; touch-action: none; user-select: none; -webkit-user-select: none; }
+.pave small { font-size: .78rem; }
+
+#apercu { width: 100%; border-radius: 12px; background: #000; margin-top: 10px; display: none; }
+#apercu.actif { display: block; }
+
+.message { position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 5; margin: 0 auto; max-width: 32rem;
+  padding: 12px 14px; border-radius: 10px; background: #1f6f3f; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+.message.erreur { background: #9b2230; }
+.avertissement { background: #3a2f12; color: #ffd98a; padding: 10px 12px; border-radius: 10px; font-size: .9rem; }

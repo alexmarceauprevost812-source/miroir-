@@ -1,25 +1,45 @@
 #!/usr/bin/env python3
-"""miroir — partager des fichiers entre Linux et un téléphone avec un code QR.
+"""miroir — relier un téléphone et un PC Linux en scannant un code QR.
 
-  miroir envoyer FICHIER...      Linux -> téléphone : le téléphone scanne et télécharge
-  miroir recevoir [-d DOSSIER]   téléphone -> Linux : le téléphone scanne et envoie
-  miroir tv                      ouvre l'écran TV de Miroir (code QR pour le téléphone)
+  miroir hub [FICHIER...]        tout-en-un sur le téléphone : fichiers, presse-papiers,
+                                 texte/lien, télécommande, notifications, webcam
+  miroir webcam                  comme hub, en HTTPS, ouvert sur la webcam
+  miroir envoyer FICHIER...      Linux -> téléphone, simple téléchargement
+  miroir recevoir [-d DOSSIER]   téléphone -> Linux, simple envoi
+  miroir wifi                    QR qui connecte un invité au Wi-Fi sans mot de passe
+  miroir qr lien|texte|contact|wifi ...   générateur de codes QR
+  miroir tv                      ouvre l'écran TV de Miroir depuis ce PC
 
 Le téléphone et l'ordinateur doivent être sur le même réseau Wi-Fi.
 """
 
 import argparse
+import getpass
+import glob
+import hmac
 import html
+import json
+import mimetypes
 import os
+import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 import webbrowser
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http import cookies
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 DOSSIER_APP = os.path.dirname(os.path.realpath(__file__))
+DOSSIER_PAGES = os.path.join(DOSSIER_APP, "pc")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "miroir")
+RECEPTION_DEFAUT = os.path.expanduser("~/Téléchargements/miroir")
+
+mimetypes.add_type("application/vnd.android.package-archive", ".apk")
 
 STYLE = """<meta name="viewport" content="width=device-width, initial-scale=1"><style>
 body{margin:0;background:#0f1115;color:#f2f2f2;font-family:system-ui,sans-serif;padding:16px}
@@ -27,6 +47,8 @@ h1{font-size:1.6rem}a,button,label.b{display:block;background:#4f8cff;color:#fff
 text-decoration:none;margin:10px 0;font-size:1.05rem;border:0;text-align:center;word-break:break-all}
 small{color:#9aa3b2}progress{width:100%}li{list-style:none;margin:8px 0}ul{padding:0}</style>"""
 
+
+# ---------- utilitaires ----------
 
 def ip_locale():
     """Adresse IP de la machine sur le réseau local."""
@@ -40,19 +62,43 @@ def ip_locale():
         s.close()
 
 
-def afficher_qr(url):
-    """Affiche un code QR dans le terminal (qrencode, ou le module python qrcode)."""
-    print()
+def qr_terminal(donnees):
+    """Dessine un code QR dans le terminal. Renvoie False si aucun outil n'est disponible."""
     if shutil.which("qrencode"):
-        subprocess.run(["qrencode", "-t", "ansiutf8", "-m", "2", url])
-    else:
-        try:
-            import qrcode
-            qr = qrcode.QRCode(border=2)
-            qr.add_data(url)
-            qr.print_ascii(invert=True)
-        except ImportError:
-            print("  (Pour voir le code QR ici : sudo apt install qrencode)")
+        subprocess.run(["qrencode", "-t", "ansiutf8", "-m", "2", donnees])
+        return True
+    try:
+        import qrcode
+    except ImportError:
+        print("  (Pour voir le code QR ici : sudo apt install qrencode)")
+        return False
+    qr = qrcode.QRCode(border=2)
+    qr.add_data(donnees)
+    qr.print_ascii(invert=True)
+    return True
+
+
+def qr_fichier(donnees, chemin):
+    """Enregistre le code QR en PNG ou SVG."""
+    svg = chemin.lower().endswith(".svg")
+    if shutil.which("qrencode"):
+        subprocess.run(["qrencode", "-t", "SVG" if svg else "PNG", "-s", "10", "-m", "2",
+                        "-o", chemin, donnees], check=True)
+        return
+    try:
+        import qrcode
+        if svg:
+            import qrcode.image.svg
+            qrcode.make(donnees, image_factory=qrcode.image.svg.SvgPathImage).save(chemin)
+        else:
+            qrcode.make(donnees, box_size=10, border=2).save(chemin)
+    except ImportError:
+        sys.exit("miroir: installez qrencode (sudo apt install qrencode) ou pip install 'qrcode[pil]'")
+
+
+def afficher_qr(url):
+    print()
+    qr_terminal(url)
     print(f"\n  Scannez le code QR ou ouvrez : \033[1m{url}\033[0m")
     print("  Ctrl+C pour arrêter.\n")
 
@@ -73,6 +119,49 @@ def lancer(gestionnaire, port, chemin=""):
     except KeyboardInterrupt:
         print("\nArrêté.")
     return url
+
+
+def nom_libre(dossier, nom):
+    """Nom de fichier sûr (sans chemin) qui n'écrase rien dans le dossier."""
+    nom = os.path.basename(nom.replace("\\", "/")).strip().lstrip(".") or "fichier"
+    base, ext = os.path.splitext(nom)
+    chemin, n = os.path.join(dossier, nom), 1
+    while os.path.exists(chemin):
+        chemin = os.path.join(dossier, f"{base} ({n}){ext}")
+        n += 1
+    return chemin
+
+
+def recevoir_corps(gestionnaire, dossier, nom):
+    """Écrit le corps de la requête dans le dossier. Renvoie le chemin, ou None si incomplet."""
+    reste = int(gestionnaire.headers.get("Content-Length", 0))
+    chemin = nom_libre(dossier, nom)
+    with open(chemin, "wb") as sortie:
+        while reste > 0:
+            bloc = gestionnaire.rfile.read(min(reste, 1 << 20))
+            if not bloc:
+                break
+            sortie.write(bloc)
+            reste -= len(bloc)
+    if reste:
+        os.remove(chemin)
+        return None
+    return chemin
+
+
+def executer(cmd, entree=None, sortie=False):
+    """Lance une commande système, sans jamais lever d'exception."""
+    try:
+        r = subprocess.run(cmd, input=entree, timeout=5,
+                           stdout=subprocess.PIPE if sortie else subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        return r.stdout if sortie else r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return b"" if sortie else False
+
+
+def wayland():
+    return bool(os.environ.get("WAYLAND_DISPLAY")) or os.environ.get("XDG_SESSION_TYPE") == "wayland"
 
 
 # ---------- envoyer : Linux -> téléphone ----------
@@ -108,16 +197,8 @@ def cmd_envoyer(args):
                     f = fichiers[int(self.path[3:])]
                 except (ValueError, IndexError):
                     return self.send_error(404)
-                nom = os.path.basename(f)
-                self.send_response(200)
-                self.send_header("Content-Type", self.guess_type(f))
-                self.send_header("Content-Length", str(os.path.getsize(f)))
-                self.send_header("Content-Disposition",
-                                 "attachment; filename*=UTF-8''" + urllib.parse.quote(nom))
-                self.end_headers()
-                with open(f, "rb") as source:
-                    shutil.copyfileobj(source, self.wfile)
-                print(f"  ✓ téléchargé par {self.client_address[0]} : {nom}")
+                envoyer_fichier(self, f)
+                print(f"  ✓ téléchargé par {self.client_address[0]} : {os.path.basename(f)}")
             else:
                 self.send_error(404)
 
@@ -131,6 +212,18 @@ def cmd_envoyer(args):
 
     print(f"Partage de {len(fichiers)} fichier(s).")
     lancer(Envoi, args.port)
+
+
+def envoyer_fichier(gestionnaire, chemin):
+    nom = os.path.basename(chemin)
+    gestionnaire.send_response(200)
+    gestionnaire.send_header("Content-Type", mimetypes.guess_type(nom)[0] or "application/octet-stream")
+    gestionnaire.send_header("Content-Length", str(os.path.getsize(chemin)))
+    gestionnaire.send_header("Content-Disposition",
+                             "attachment; filename*=UTF-8''" + urllib.parse.quote(nom))
+    gestionnaire.end_headers()
+    with open(chemin, "rb") as source:
+        shutil.copyfileobj(source, gestionnaire.wfile)
 
 
 # ---------- recevoir : téléphone -> Linux ----------
@@ -160,16 +253,6 @@ f.onchange = async () => {
 </script>"""
 
 
-def nom_libre(dossier, nom):
-    nom = os.path.basename(nom.replace("\\", "/")).strip() or "fichier"
-    base, ext = os.path.splitext(nom)
-    chemin, n = os.path.join(dossier, nom), 1
-    while os.path.exists(chemin):
-        chemin = os.path.join(dossier, f"{base} ({n}){ext}")
-        n += 1
-    return chemin
-
-
 def cmd_recevoir(args):
     dossier = os.path.abspath(args.dossier)
     os.makedirs(dossier, exist_ok=True)
@@ -191,17 +274,8 @@ def cmd_recevoir(args):
             if url.path != "/envoi":
                 return self.send_error(404)
             nom = urllib.parse.parse_qs(url.query).get("nom", ["fichier"])[0]
-            reste = int(self.headers.get("Content-Length", 0))
-            chemin = nom_libre(dossier, nom)
-            with open(chemin, "wb") as sortie:
-                while reste > 0:
-                    bloc = self.rfile.read(min(reste, 1 << 20))
-                    if not bloc:
-                        break
-                    sortie.write(bloc)
-                    reste -= len(bloc)
-            if reste:
-                os.remove(chemin)
+            chemin = recevoir_corps(self, dossier, nom)
+            if not chemin:
                 return self.send_error(400, "envoi incomplet")
             print(f"  ✓ reçu : {chemin} ({taille(os.path.getsize(chemin))})")
             self.send_response(200)
@@ -210,6 +284,666 @@ def cmd_recevoir(args):
 
     print(f"Les fichiers reçus seront enregistrés dans : {dossier}")
     lancer(Reception, args.port)
+
+
+# ---------- hub : les outils du bureau Linux ----------
+
+class PressePapiers:
+    def __init__(self):
+        if wayland() and shutil.which("wl-copy") and shutil.which("wl-paste"):
+            self.outil, self.ecrire_cmd, self.lire_cmd = "wl-clipboard", ["wl-copy"], ["wl-paste", "-n"]
+        elif shutil.which("xclip"):
+            self.outil = "xclip"
+            self.ecrire_cmd = ["xclip", "-selection", "clipboard", "-in"]
+            self.lire_cmd = ["xclip", "-selection", "clipboard", "-out"]
+        elif shutil.which("xsel"):
+            self.outil, self.ecrire_cmd, self.lire_cmd = "xsel", ["xsel", "-b", "-i"], ["xsel", "-b", "-o"]
+        else:
+            self.outil = None
+
+    def lire(self):
+        return executer(self.lire_cmd, sortie=True).decode("utf-8", "replace") if self.outil else ""
+
+    def ecrire(self, texte):
+        return bool(self.outil) and executer(self.ecrire_cmd, entree=texte.encode())
+
+
+class Controle:
+    """Souris, clavier, volume et médias avec xdotool (X11) ou ydotool (Wayland)."""
+
+    # nom -> (nom xdotool, code clavier Linux pour ydotool)
+    TOUCHES = {
+        "gauche": ("Left", 105), "droite": ("Right", 106), "haut": ("Up", 103), "bas": ("Down", 108),
+        "entree": ("Return", 28), "retour": ("BackSpace", 14), "echap": ("Escape", 1),
+        "tab": ("Tab", 15), "espace": ("space", 57), "pageprec": ("Page_Up", 104),
+        "pagesuiv": ("Page_Down", 109), "debut": ("Home", 102), "fin": ("End", 107),
+        "f5": ("F5", 63), "f11": ("F11", 87), "noir": ("b", 48),
+    }
+    MEDIAS = {"lecture": ("play-pause", "XF86AudioPlay", 164),
+              "suivant": ("next", "XF86AudioNext", 163),
+              "precedent": ("previous", "XF86AudioPrev", 165)}
+    BOUTONS = {"gauche": ("1", "0xC0"), "droit": ("3", "0xC1"), "milieu": ("2", "0xC2")}
+
+    def __init__(self):
+        if shutil.which("ydotool") and (wayland() or not shutil.which("xdotool")):
+            self.outil = "ydotool"
+        elif shutil.which("xdotool"):
+            self.outil = "xdotool"
+        else:
+            self.outil = None
+        self.volume = next((o for o in ("wpctl", "pactl", "amixer") if shutil.which(o)), None)
+        self.media = "playerctl" if shutil.which("playerctl") else self.outil
+
+    def deplacer(self, dx, dy):
+        if self.outil == "xdotool":
+            return executer(["xdotool", "mousemove_relative", "--", str(dx), str(dy)])
+        if self.outil == "ydotool":
+            return executer(["ydotool", "mousemove", "-x", str(dx), "-y", str(dy)])
+        return False
+
+    def clic(self, bouton):
+        x, y = self.BOUTONS[bouton]
+        if self.outil == "xdotool":
+            return executer(["xdotool", "click", x])
+        if self.outil == "ydotool":
+            return executer(["ydotool", "click", y])
+        return False
+
+    def defiler(self, n):
+        """n > 0 : vers le bas."""
+        if self.outil == "xdotool":
+            return executer(["xdotool", "click", "--repeat", str(abs(n)), "5" if n > 0 else "4"])
+        if self.outil == "ydotool":
+            return executer(["ydotool", "mousemove", "-w", "-x", "0", "-y", str(-n)])
+        return False
+
+    def taper(self, texte):
+        if self.outil == "xdotool":
+            return executer(["xdotool", "type", "--delay", "5", "--", texte])
+        if self.outil == "ydotool":
+            return executer(["ydotool", "type", "--", texte])
+        return False
+
+    def touche(self, nom):
+        x, code = self.TOUCHES[nom]
+        if self.outil == "xdotool":
+            return executer(["xdotool", "key", x])
+        if self.outil == "ydotool":
+            return executer(["ydotool", "key", f"{code}:1", f"{code}:0"])
+        return False
+
+    def regler_volume(self, sens):
+        cmds = {
+            "wpctl": {"plus": ["wpctl", "set-volume", "-l", "1.5", "@DEFAULT_AUDIO_SINK@", "5%+"],
+                      "moins": ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"],
+                      "muet": ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]},
+            "pactl": {"plus": ["pactl", "set-sink-volume", "@DEFAULT_SINK@", "+5%"],
+                      "moins": ["pactl", "set-sink-volume", "@DEFAULT_SINK@", "-5%"],
+                      "muet": ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"]},
+            "amixer": {"plus": ["amixer", "-q", "set", "Master", "5%+"],
+                       "moins": ["amixer", "-q", "set", "Master", "5%-"],
+                       "muet": ["amixer", "-q", "set", "Master", "toggle"]},
+        }
+        return bool(self.volume) and executer(cmds[self.volume][sens])
+
+    def commande_media(self, nom):
+        pc, x, code = self.MEDIAS[nom]
+        if self.media == "playerctl":
+            return executer(["playerctl", pc])
+        if self.media == "xdotool":
+            return executer(["xdotool", "key", x])
+        if self.media == "ydotool":
+            return executer(["ydotool", "key", f"{code}:1", f"{code}:0"])
+        return False
+
+
+class Webcam:
+    """Reçoit les images JPEG du téléphone : flux MJPEG + webcam virtuelle v4l2loopback."""
+
+    def __init__(self, peripherique):
+        self.peripherique = peripherique
+        self.cond = threading.Condition()
+        self.image, self.numero = None, 0
+        self.verrou = threading.Lock()
+        self.ffmpeg, self.dernier_lancement = None, 0.0
+
+    def recevoir(self, jpeg):
+        with self.cond:
+            self.image, self.numero = jpeg, self.numero + 1
+            self.cond.notify_all()
+        if self.peripherique:
+            self.vers_v4l2(jpeg)
+
+    def vers_v4l2(self, jpeg):
+        with self.verrou:
+            if self.ffmpeg is None or self.ffmpeg.poll() is not None:
+                if time.monotonic() - self.dernier_lancement < 2:
+                    return
+                self.dernier_lancement = time.monotonic()
+                self.ffmpeg = subprocess.Popen(
+                    ["ffmpeg", "-loglevel", "error", "-fflags", "nobuffer", "-f", "mjpeg", "-i", "-",
+                     "-pix_fmt", "yuv420p", "-f", "v4l2", self.peripherique],
+                    stdin=subprocess.PIPE)
+                print(f"  📷 webcam virtuelle active : {self.peripherique}")
+            try:
+                self.ffmpeg.stdin.write(jpeg)
+                self.ffmpeg.stdin.flush()
+            except (BrokenPipeError, OSError):
+                self.ffmpeg = None
+
+    def attendre(self, apres):
+        with self.cond:
+            self.cond.wait_for(lambda: self.numero != apres, timeout=10)
+            return self.image, self.numero
+
+
+def peripherique_v4l2loopback():
+    for chemin in sorted(glob.glob("/sys/devices/virtual/video4linux/video*")):
+        return "/dev/" + os.path.basename(chemin)
+    return None
+
+
+def jeton_persistant(nouveau=False):
+    """Jeton secret de connexion, gardé entre deux lancements (le QR reste valable)."""
+    os.makedirs(CONFIG, mode=0o700, exist_ok=True)
+    chemin = os.path.join(CONFIG, "jeton")
+    if not nouveau and os.path.exists(chemin):
+        with open(chemin) as f:
+            jeton = f.read().strip()
+        if jeton:
+            return jeton
+    jeton = secrets.token_urlsafe(18)
+    fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(jeton)
+    return jeton
+
+
+def certificat():
+    """Certificat auto-signé pour le HTTPS (nécessaire pour la caméra du téléphone)."""
+    cert, cle = os.path.join(CONFIG, "cert.pem"), os.path.join(CONFIG, "cle.pem")
+    if not (os.path.exists(cert) and os.path.exists(cle)):
+        if not shutil.which("openssl"):
+            sys.exit("miroir: le HTTPS nécessite openssl (sudo apt install openssl)")
+        os.makedirs(CONFIG, mode=0o700, exist_ok=True)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
+                        "-subj", "/CN=miroir", "-keyout", cle, "-out", cert],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.chmod(cle, 0o600)
+    return cert, cle
+
+
+def lister_partages(racines):
+    fichiers = []
+    for r, racine in enumerate(racines):
+        if os.path.isfile(racine):
+            fichiers.append({"r": r, "p": "", "nom": os.path.basename(racine),
+                             "taille": os.path.getsize(racine)})
+        elif os.path.isdir(racine):
+            for dossier, sous, noms in os.walk(racine):
+                sous[:] = sorted(d for d in sous if not d.startswith("."))
+                for n in sorted(noms):
+                    if n.startswith("."):
+                        continue
+                    chemin = os.path.join(dossier, n)
+                    if resoudre_partage(racines, r, os.path.relpath(chemin, racine)):
+                        fichiers.append({"r": r, "p": os.path.relpath(chemin, racine), "nom": n,
+                                         "taille": os.path.getsize(chemin)})
+    return fichiers
+
+
+def resoudre_partage(racines, r, p):
+    """Chemin réel d'un fichier partagé, en refusant toute sortie du dossier partagé."""
+    try:
+        racine = racines[int(r)]
+    except (ValueError, IndexError):
+        return None
+    if os.path.isfile(racine):
+        return racine if p == "" else None
+    base = os.path.realpath(racine)
+    chemin = os.path.realpath(os.path.join(base, p))
+    if os.path.commonpath([chemin, base]) != base or not os.path.isfile(chemin):
+        return None
+    return chemin
+
+
+PAGE_REFUS = """<!doctype html><meta charset=utf-8><title>Miroir</title>""" + STYLE + """
+<h1>🔒 Miroir</h1><p>Scannez le code QR affiché dans le terminal du PC
+(<code>miroir hub</code>) pour vous connecter.</p>"""
+
+FICHIERS_STATIQUES = {"telephone.js": "text/javascript", "style.css": "text/css"}
+
+
+class Hub:
+    """État partagé du serveur hub."""
+
+    def __init__(self, args, https):
+        self.jeton = jeton_persistant(args.nouveau_jeton)
+        self.https = https
+        self.racines = [os.path.abspath(f) for f in args.fichiers]
+        self.dossier = os.path.abspath(args.dossier)
+        self.presse_papiers = PressePapiers()
+        self.controle = Controle()
+        self.notify = shutil.which("notify-send")
+        v4l2 = args.v4l2 or peripherique_v4l2loopback()
+        self.webcam = Webcam(v4l2 if v4l2 and shutil.which("ffmpeg") else None)
+        self.textes = []
+
+    def notifier(self, titre, texte="", appli="Miroir"):
+        print(f"  🔔 {appli} — {titre}" + (f" : {texte}" if texte else ""))
+        if self.notify:
+            executer(["notify-send", "-a", appli[:60], "-i", "phone", "--", titre[:200], texte[:1000]])
+
+
+def gestionnaire_hub(hub):
+    class Gestionnaire(BaseHTTPRequestHandler):
+        server_version = "miroir"
+
+        def log_message(self, *a):
+            pass
+
+        # --- réponses ---
+        def repondre(self, code, corps=b"", type_="text/plain; charset=utf-8", entetes=()):
+            self.send_response(code)
+            self.send_header("Content-Type", type_)
+            self.send_header("Content-Length", str(len(corps)))
+            self.send_header("Cache-Control", "no-store")
+            for cle, valeur in entetes:
+                self.send_header(cle, valeur)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(corps)
+
+        def json(self, objet, code=200):
+            self.repondre(code, json.dumps(objet).encode(), "application/json")
+
+        def corps(self, maximum=1 << 20):
+            n = int(self.headers.get("Content-Length", 0))
+            if n > maximum:
+                raise ValueError("trop grand")
+            return self.rfile.read(n)
+
+        def corps_json(self):
+            try:
+                return json.loads(self.corps() or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                return {}
+
+        # --- connexion par QR : le jeton du QR devient un cookie ---
+        def jeton_requete(self):
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                return auth[7:].strip(), False
+            requete = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if "t" in requete:
+                return requete["t"][0], False
+            try:
+                c = cookies.SimpleCookie(self.headers.get("Cookie", "")).get("miroir")
+            except cookies.CookieError:
+                c = None
+            return (c.value if c else ""), True
+
+        def autorise(self):
+            jeton, par_cookie = self.jeton_requete()
+            if not jeton or not hmac.compare_digest(jeton.encode(), hub.jeton.encode()):
+                return False
+            # Protection CSRF : les écritures faites avec le cookie doivent venir de la page.
+            if par_cookie and self.command not in ("GET", "HEAD"):
+                return self.headers.get("X-Miroir") == "1"
+            return True
+
+        def local(self):
+            return self.client_address[0] in ("127.0.0.1", "::1")
+
+        # --- routes ---
+        def do_HEAD(self):
+            self.do_GET()
+
+        def do_GET(self):
+            url = urllib.parse.urlparse(self.path)
+            chemin = url.path
+            if chemin.startswith("/pc/") and chemin[4:] in FICHIERS_STATIQUES:
+                with open(os.path.join(DOSSIER_PAGES, chemin[4:]), "rb") as f:
+                    return self.repondre(200, f.read(), FICHIERS_STATIQUES[chemin[4:]])
+            if chemin in ("/webcam.mjpg", "/webcam") and (self.local() or self.autorise()):
+                return self.flux_webcam() if chemin == "/webcam.mjpg" else self.repondre(
+                    200, b"<!doctype html><title>Miroir webcam</title><body style='margin:0;background:#000'>"
+                         b"<img src='/webcam.mjpg' style='width:100vw;height:100vh;object-fit:contain'>",
+                    "text/html; charset=utf-8")
+            if not self.autorise():
+                if chemin == "/":
+                    return self.repondre(401, PAGE_REFUS.encode(), "text/html; charset=utf-8")
+                return self.json({"erreur": "non autorisé"}, 401)
+            if chemin == "/":
+                with open(os.path.join(DOSSIER_PAGES, "telephone.html"), "rb") as f:
+                    page = f.read()
+                cookie = f"miroir={hub.jeton}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax"
+                if hub.https:
+                    cookie += "; Secure"
+                return self.repondre(200, page, "text/html; charset=utf-8", [("Set-Cookie", cookie)])
+            if chemin == "/api/etat":
+                return self.json(self.etat())
+            if chemin == "/api/fichiers":
+                return self.json(lister_partages(hub.racines))
+            if chemin == "/api/fichier":
+                q = urllib.parse.parse_qs(url.query)
+                fichier = resoudre_partage(hub.racines, q.get("r", [""])[0], q.get("p", [""])[0])
+                if not fichier:
+                    return self.json({"erreur": "introuvable"}, 404)
+                envoyer_fichier(self, fichier)
+                print(f"  ⬇ téléchargé par le téléphone : {os.path.basename(fichier)}")
+                return
+            if chemin == "/api/presse-papiers":
+                return self.json({"texte": hub.presse_papiers.lire()})
+            self.json({"erreur": "introuvable"}, 404)
+
+        def do_POST(self):
+            chemin = urllib.parse.urlparse(self.path).path
+            if not self.autorise():
+                return self.json({"erreur": "non autorisé"}, 401)
+            try:
+                if chemin == "/api/webcam":
+                    hub.webcam.recevoir(self.corps(10 << 20))
+                    return self.json({"ok": True})
+                if chemin == "/api/notification":
+                    return self.notification()
+                donnees = self.corps_json()
+            except ValueError:
+                return self.json({"erreur": "requête trop grande"}, 413)
+            if chemin == "/api/presse-papiers":
+                texte = str(donnees.get("texte", ""))
+                ok = hub.presse_papiers.ecrire(texte)
+                print(f"  📋 copié sur le PC : {texte[:80]!r}")
+                return self.json({"ok": ok})
+            if chemin == "/api/texte":
+                return self.texte(donnees)
+            if chemin == "/api/controle":
+                return self.json({"ok": self.controle(donnees)})
+            self.json({"erreur": "introuvable"}, 404)
+
+        def do_PUT(self):
+            url = urllib.parse.urlparse(self.path)
+            if not self.autorise():
+                return self.json({"erreur": "non autorisé"}, 401)
+            if url.path != "/api/envoi":
+                return self.json({"erreur": "introuvable"}, 404)
+            os.makedirs(hub.dossier, exist_ok=True)
+            nom = urllib.parse.parse_qs(url.query).get("nom", ["fichier"])[0]
+            chemin = recevoir_corps(self, hub.dossier, nom)
+            if not chemin:
+                return self.json({"erreur": "envoi incomplet"}, 400)
+            print(f"  ⬆ reçu : {chemin} ({taille(os.path.getsize(chemin))})")
+            hub.notifier("Fichier reçu", os.path.basename(chemin))
+            self.json({"ok": True, "nom": os.path.basename(chemin)})
+
+        # --- fonctions ---
+        def etat(self):
+            hote = self.headers.get("Host", f"{ip_locale()}")
+            schema = "https" if hub.https else "http"
+            return {
+                "machine": socket.gethostname(),
+                "dossier": hub.dossier,
+                "presse_papiers": hub.presse_papiers.outil,
+                "controle": hub.controle.outil,
+                "volume": hub.controle.volume,
+                "media": hub.controle.media,
+                "notifications": bool(hub.notify),
+                "https": hub.https,
+                "webcam_v4l2": hub.webcam.peripherique,
+                "url_webcam": f"{schema}://{hote}/webcam",
+                "url_notification": f"{schema}://{hote}/api/notification?t={hub.jeton}",
+            }
+
+        def texte(self, donnees):
+            texte = str(donnees.get("texte", "")).strip()
+            action = donnees.get("action")
+            if not texte:
+                return self.json({"ok": False, "erreur": "texte vide"}, 400)
+            hub.textes.append(texte)
+            if action == "ouvrir":
+                lien = urllib.parse.urlparse(texte)
+                if lien.scheme not in ("http", "https") or not lien.netloc:
+                    return self.json({"ok": False, "erreur": "ce n'est pas un lien web"}, 400)
+                print(f"  🔗 ouverture : {texte}")
+                try:
+                    subprocess.Popen(["xdg-open", texte], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                except OSError:
+                    return self.json({"ok": False, "erreur": "xdg-open introuvable"}, 500)
+                return self.json({"ok": True})
+            if action == "notifier":
+                hub.notifier("Texte du téléphone", texte)
+                return self.json({"ok": True})
+            return self.json({"ok": False, "erreur": "action inconnue"}, 400)
+
+        def notification(self):
+            brut = self.corps()
+            if "json" in self.headers.get("Content-Type", ""):
+                try:
+                    d = json.loads(brut or b"{}")
+                except ValueError:
+                    d = {}
+            else:
+                d = {"texte": brut.decode("utf-8", "replace")}
+            titre = str(d.get("titre") or d.get("title") or "Téléphone")
+            texte = str(d.get("texte") or d.get("text") or d.get("message") or "")
+            appli = str(d.get("appli") or d.get("app") or "Téléphone")
+            hub.notifier(titre, texte, appli)
+            self.json({"ok": True})
+
+        def controle(self, d):
+            c = hub.controle
+            action, valeur = d.get("action"), d.get("valeur")
+            try:
+                if action == "deplacer":
+                    dx = max(-2000, min(2000, int(d.get("dx", 0))))
+                    dy = max(-2000, min(2000, int(d.get("dy", 0))))
+                    return c.deplacer(dx, dy)
+                if action == "defiler":
+                    return c.defiler(max(-50, min(50, int(d.get("n", 0)))))
+            except (TypeError, ValueError):
+                return False
+            if action == "clic" and valeur in c.BOUTONS:
+                return c.clic(valeur)
+            if action == "touche" and valeur in c.TOUCHES:
+                return c.touche(valeur)
+            if action == "taper" and isinstance(valeur, str) and 0 < len(valeur) <= 2000:
+                return c.taper(valeur)
+            if action == "volume" and valeur in ("plus", "moins", "muet"):
+                return c.regler_volume(valeur)
+            if action == "media" and valeur in c.MEDIAS:
+                return c.commande_media(valeur)
+            return False
+
+        def flux_webcam(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=cadre")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            numero = -1
+            try:
+                while True:
+                    image, numero = hub.webcam.attendre(numero)
+                    if image is None:
+                        continue
+                    self.wfile.write(b"--cadre\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                     + str(len(image)).encode() + b"\r\n\r\n" + image + b"\r\n")
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
+                pass
+
+    return Gestionnaire
+
+
+class ServeurHub(ThreadingHTTPServer):
+    def handle_error(self, requete, adresse):
+        # Les téléphones qui refusent le certificat ou coupent la connexion : rien d'anormal.
+        if isinstance(sys.exc_info()[1], (ssl.SSLError, ConnectionError, TimeoutError)):
+            return
+        super().handle_error(requete, adresse)
+
+
+def cmd_hub(args, onglet=""):
+    https = args.https
+    hub = Hub(args, https)
+    serveur = ServeurHub(("0.0.0.0", args.port), gestionnaire_hub(hub))
+    if https:
+        contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        contexte.load_cert_chain(*certificat())
+        serveur.socket = contexte.wrap_socket(serveur.socket, server_side=True,
+                                              do_handshake_on_connect=False)
+    base = f"{'https' if https else 'http'}://{ip_locale()}:{serveur.server_address[1]}"
+    url = f"{base}/?t={hub.jeton}" + (f"#{onglet}" if onglet else "")
+
+    ok, non = "\033[32m✓\033[0m", "\033[33m✗\033[0m"
+    print("Miroir hub — fonctions disponibles :")
+    print(f"  {ok} fichiers téléphone ↔ PC (reçus dans {hub.dossier})")
+    pp = hub.presse_papiers.outil
+    print(f"  {ok if pp else non} presse-papiers partagé"
+          + (f" ({pp})" if pp else " : installez xclip (X11) ou wl-clipboard (Wayland)"))
+    print(f"  {ok} texte et liens vers le PC")
+    ct = hub.controle.outil
+    print(f"  {ok if ct else non} télécommande souris/clavier/diapos"
+          + (f" ({ct})" if ct else " : installez xdotool (X11) ou ydotool (Wayland)"))
+    vol = hub.controle.volume
+    print(f"  {ok if vol else non} volume" + (f" ({vol})" if vol else " : installez wireplumber, pulseaudio-utils ou alsa-utils"))
+    print(f"  {ok if hub.notify else non} notifications sur le bureau"
+          + ("" if hub.notify else " : installez libnotify-bin"))
+    if not https:
+        print(f"  {non} webcam : nécessite HTTPS, lancez « miroir webcam »")
+    elif hub.webcam.peripherique:
+        print(f"  {ok} webcam virtuelle {hub.webcam.peripherique} (+ flux {base}/webcam)")
+    else:
+        print(f"  {ok} webcam : flux {base}/webcam"
+              " (pour une vraie webcam : sudo modprobe v4l2loopback exclusive_caps=1, et ffmpeg)")
+    if https:
+        print("\n  Le certificat est auto-signé : sur le téléphone, acceptez l'avertissement"
+              " (« Paramètres avancés » → « Continuer »).")
+    print("\n  Scannez ce QR pour vous connecter sans mot de passe "
+          "(le lien reste valable ; « --nouveau-jeton » pour le révoquer) :")
+    print()
+    qr_terminal(url)
+    print(f"\n  Ou ouvrez : \033[1m{url}\033[0m")
+    print("  Ctrl+C pour arrêter.\n")
+    try:
+        serveur.serve_forever()
+    except KeyboardInterrupt:
+        print("\nArrêté.")
+
+
+def cmd_webcam(args):
+    args.https = True
+    cmd_hub(args, "webcam")
+
+
+# ---------- générateur de QR : wifi, contact, lien, texte ----------
+
+def echapper_wifi(texte):
+    return "".join("\\" + c if c in '\\;,:"' else c for c in texte)
+
+
+def qr_wifi(ssid, mdp, securite="WPA", cache=False):
+    securite = {"aucune": "nopass", "": "nopass", "nopass": "nopass"}.get(securite, securite)
+    texte = f"WIFI:T:{securite};S:{echapper_wifi(ssid)};"
+    if securite != "nopass":
+        texte += f"P:{echapper_wifi(mdp)};"
+    if cache:
+        texte += "H:true;"
+    return texte + ";"
+
+
+def wifi_actuel():
+    """(ssid, mot de passe, sécurité) du Wi-Fi actuel via NetworkManager, ou None."""
+    if not shutil.which("nmcli"):
+        return None
+    lignes = executer(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"],
+                      sortie=True).decode(errors="replace").splitlines()
+    for ligne in lignes:
+        nom, _, type_ = ligne.rpartition(":")
+        if type_ != "802-11-wireless":
+            continue
+        nom = nom.replace("\\:", ":")
+
+        def champ(c):
+            return executer(["nmcli", "-s", "-g", c, "connection", "show", nom],
+                            sortie=True).decode(errors="replace").strip()
+        ssid = champ("802-11-wireless.ssid") or nom
+        gestion = champ("802-11-wireless-security.key-mgmt")
+        if gestion == "none":
+            return ssid, champ("802-11-wireless-security.wep-key0"), "WEP"
+        if gestion == "sae":
+            return ssid, champ("802-11-wireless-security.psk"), "SAE"
+        if gestion in ("wpa-psk", "wpa-none"):
+            return ssid, champ("802-11-wireless-security.psk"), "WPA"
+        return ssid, "", "nopass"
+    return None
+
+
+def cmd_wifi(args):
+    if args.ssid:
+        ssid, securite = args.ssid, args.securite
+        mdp = args.mdp
+        if mdp is None and securite != "aucune":
+            mdp = getpass.getpass(f"Mot de passe du Wi-Fi « {ssid} » : ")
+    else:
+        trouve = wifi_actuel()
+        if not trouve:
+            sys.exit("miroir: Wi-Fi actuel introuvable (NetworkManager). "
+                     "Précisez-le : miroir wifi --ssid NOM [--mdp MOTDEPASSE]")
+        ssid, mdp, securite = trouve
+        if securite != "nopass" and not mdp:
+            mdp = getpass.getpass(f"Mot de passe du Wi-Fi « {ssid} » (non lisible automatiquement) : ")
+    donnees = qr_wifi(ssid, mdp or "", securite, args.cache)
+    sortir_qr(donnees, args.sortie, f"Wi-Fi « {ssid} » : l'invité scanne avec l'appareil photo pour se connecter.")
+
+
+def echapper_vcard(texte):
+    return texte.replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+
+
+def vcard(a):
+    morceaux = a.nom.strip().split()
+    prenom, nom = (" ".join(morceaux[:-1]), morceaux[-1]) if len(morceaux) > 1 else ("", a.nom.strip())
+    lignes = ["BEGIN:VCARD", "VERSION:3.0",
+              f"N:{echapper_vcard(nom)};{echapper_vcard(prenom)};;;", f"FN:{echapper_vcard(a.nom.strip())}"]
+    for tel in a.tel or []:
+        lignes.append(f"TEL;TYPE=CELL:{echapper_vcard(tel)}")
+    for courriel in a.email or []:
+        lignes.append(f"EMAIL:{echapper_vcard(courriel)}")
+    if a.org:
+        lignes.append(f"ORG:{echapper_vcard(a.org)}")
+    if a.poste:
+        lignes.append(f"TITLE:{echapper_vcard(a.poste)}")
+    if a.adresse:
+        lignes.append(f"ADR:;;{echapper_vcard(a.adresse)};;;;")
+    if a.site:
+        lignes.append(f"URL:{echapper_vcard(a.site)}")
+    lignes.append("END:VCARD")
+    return "\r\n".join(lignes)
+
+
+def sortir_qr(donnees, sortie, legende):
+    if sortie:
+        qr_fichier(donnees, sortie)
+        print(f"Code QR enregistré : {sortie}")
+    else:
+        print()
+        qr_terminal(donnees)
+    print(f"\n  {legende}\n")
+
+
+def cmd_qr(args):
+    if args.type == "lien":
+        lien = args.valeur
+        if "://" not in lien:
+            lien = "https://" + lien
+        sortir_qr(lien, args.sortie, f"Lien : {lien}")
+    elif args.type == "texte":
+        texte = " ".join(args.valeur) if args.valeur else sys.stdin.read()
+        sortir_qr(texte, args.sortie, f"Texte ({len(texte)} caractères)")
+    elif args.type == "contact":
+        sortir_qr(vcard(args), args.sortie, f"Carte de contact : {args.nom}")
+    elif args.type == "wifi":
+        cmd_wifi(args)
 
 
 # ---------- tv : sert l'application web Miroir ----------
@@ -236,10 +970,37 @@ def cmd_tv(args):
         print("\nArrêté.")
 
 
+def options_wifi(p):
+    p.add_argument("--ssid", help="nom du réseau (par défaut : le Wi-Fi actuel)")
+    p.add_argument("--mdp", help="mot de passe (demandé s'il manque)")
+    p.add_argument("--securite", default="WPA", choices=["WPA", "SAE", "WEP", "aucune"])
+    p.add_argument("--cache", action="store_true", help="réseau masqué")
+    p.add_argument("-o", "--sortie", help="enregistrer en image .png ou .svg")
+    p.set_defaults(fn=cmd_wifi)
+
+
+def options_hub(p, https=False):
+    p.add_argument("fichiers", nargs="*", help="fichiers ou dossiers à proposer au téléphone")
+    p.add_argument("-d", "--dossier", default=RECEPTION_DEFAUT, help="où enregistrer les fichiers reçus")
+    p.add_argument("-p", "--port", type=int, default=8443 if https else 8080)
+    p.add_argument("--v4l2", help="webcam virtuelle v4l2loopback (ex. /dev/video10)")
+    p.add_argument("--nouveau-jeton", action="store_true",
+                   help="change le jeton de connexion (déconnecte les anciens téléphones)")
+
+
 def main():
     p = argparse.ArgumentParser(prog="miroir", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sous = p.add_subparsers(dest="commande", required=True)
+
+    h = sous.add_parser("hub", help="tout-en-un : fichiers, presse-papiers, télécommande, notifications")
+    options_hub(h)
+    h.add_argument("--https", action="store_true", help="HTTPS (webcam, presse-papiers du téléphone)")
+    h.set_defaults(fn=cmd_hub)
+
+    w = sous.add_parser("webcam", help="la caméra du téléphone devient la webcam du PC")
+    options_hub(w, https=True)
+    w.set_defaults(fn=cmd_webcam)
 
     e = sous.add_parser("envoyer", help="envoyer des fichiers de Linux vers le téléphone")
     e.add_argument("fichiers", nargs="+", help="fichiers ou dossiers")
@@ -247,9 +1008,30 @@ def main():
     e.set_defaults(fn=cmd_envoyer)
 
     r = sous.add_parser("recevoir", help="recevoir des fichiers du téléphone sur Linux")
-    r.add_argument("-d", "--dossier", default=os.path.expanduser("~/Téléchargements/miroir"))
+    r.add_argument("-d", "--dossier", default=RECEPTION_DEFAUT)
     r.add_argument("-p", "--port", type=int, default=8080)
     r.set_defaults(fn=cmd_recevoir)
+
+    options_wifi(sous.add_parser("wifi", help="QR pour connecter un invité au Wi-Fi"))
+
+    q = sous.add_parser("qr", help="générer un code QR (lien, texte, contact, wifi)")
+    qs = q.add_subparsers(dest="type", required=True)
+    ql = qs.add_parser("lien", help="ouvre une adresse web")
+    ql.add_argument("valeur")
+    qt = qs.add_parser("texte", help="texte libre (ou lu sur l'entrée standard)")
+    qt.add_argument("valeur", nargs="*")
+    qc = qs.add_parser("contact", help="carte de visite (vCard)")
+    qc.add_argument("--nom", required=True, help="Prénom Nom")
+    qc.add_argument("--tel", action="append", help="téléphone (répétable)")
+    qc.add_argument("--email", action="append", help="courriel (répétable)")
+    qc.add_argument("--org", help="entreprise")
+    qc.add_argument("--poste", help="fonction")
+    qc.add_argument("--adresse")
+    qc.add_argument("--site")
+    options_wifi(qs.add_parser("wifi", help="réseau Wi-Fi"))
+    for sp in (ql, qt, qc):
+        sp.add_argument("-o", "--sortie", help="enregistrer en image .png ou .svg")
+    q.set_defaults(fn=cmd_qr)
 
     t = sous.add_parser("tv", help="ouvrir l'écran TV de Miroir depuis ce PC")
     t.add_argument("-p", "--port", type=int, default=8080)

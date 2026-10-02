@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="theme-color" content="#0f1115">
+<title>Miroir</title>
+<link rel="stylesheet" href="/pc/style.css">
+</head>
+<body>
+<header>
+  <h1 class="logo">Miroir</h1>
+  <span id="machine" class="petit"></span>
+</header>
+
+<nav id="onglets">
+  <button data-onglet="fichiers">📁<span>Fichiers</span></button>
+  <button data-onglet="texte">📋<span>Texte</span></button>
+  <button data-onglet="telecommande">🖱️<span>Contrôle</span></button>
+  <button data-onglet="webcam">📷<span>Webcam</span></button>
+  <button data-onglet="notifications">🔔<span>Notifs</span></button>
+</nav>
+
+<p id="message" class="message" hidden></p>
+
+<main>
+<section id="fichiers">
+  <h2>Téléphone → PC</h2>
+  <label class="bouton">📤 Choisir des fichiers (photos, APK, documents…)
+    <input id="choix" type="file" multiple hidden>
+  </label>
+  <p class="petit">Enregistrés sur le PC dans <code id="dossier"></code></p>
+  <ul id="envois" class="liste"></ul>
+
+  <h2>PC → téléphone</h2>
+  <button id="rafraichir" class="secondaire">🔄 Actualiser la liste</button>
+  <ul id="partages" class="liste"></ul>
+  <p id="aucunPartage" class="petit" hidden>
+    Aucun fichier proposé. Sur le PC : <code>miroir hub photo.jpg appli.apk Documents/</code>
+  </p>
+</section>
+
+<section id="texte" hidden>
+  <h2>Texte, lien, presse-papiers</h2>
+  <textarea id="zone" rows="6" placeholder="Écrivez ou collez un texte, un lien…"></textarea>
+  <div class="grille">
+    <button id="copierPc">📋 Copier sur le PC</button>
+    <button id="ouvrirPc">🔗 Ouvrir le lien sur le PC</button>
+    <button id="notifierPc">🔔 Afficher sur le PC</button>
+    <button id="lirePc" class="secondaire">📥 Prendre le presse-papiers du PC</button>
+    <button id="collerTel" class="secondaire">📄 Coller du téléphone</button>
+  </div>
+  <p id="ppManque" class="avertissement" hidden>
+    Presse-papiers du PC indisponible : installez <code>xclip</code> (X11) ou <code>wl-clipboard</code> (Wayland).
+  </p>
+</section>
+
+<section id="telecommande" hidden>
+  <p id="ctManque" class="avertissement" hidden>
+    Télécommande indisponible : installez <code>xdotool</code> (X11) ou <code>ydotool</code> (Wayland) sur le PC.
+  </p>
+  <h2>Souris</h2>
+  <div id="pave" class="pave">
+    <span>Pavé tactile</span>
+    <small>1 doigt : déplacer · toucher : clic<br>2 doigts : défiler · toucher à 2 doigts : clic droit</small>
+  </div>
+  <div class="grille3">
+    <button data-action="clic" data-valeur="gauche">Gauche</button>
+    <button data-action="clic" data-valeur="milieu" class="secondaire">Milieu</button>
+    <button data-action="clic" data-valeur="droit">Droit</button>
+  </div>
+  <label class="champ">Sensibilité <input id="sensibilite" type="range" min="0.5" max="4" step="0.25" value="1.75"></label>
+
+  <h2>Clavier</h2>
+  <form id="formClavier" class="ligne">
+    <input id="saisie" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Texte à taper sur le PC…">
+    <button>Taper</button>
+  </form>
+  <div class="grille4">
+    <button data-action="touche" data-valeur="echap" class="secondaire">Échap</button>
+    <button data-action="touche" data-valeur="tab" class="secondaire">Tab</button>
+    <button data-action="touche" data-valeur="haut" class="secondaire">▲</button>
+    <button data-action="touche" data-valeur="retour" class="secondaire">⌫</button>
+    <button data-action="touche" data-valeur="espace" class="secondaire">Espace</button>
+    <button data-action="touche" data-valeur="gauche" class="secondaire">◀</button>
+    <button data-action="touche" data-valeur="bas" class="secondaire">▼</button>
+    <button data-action="touche" data-valeur="droite" class="secondaire">▶</button>
+  </div>
+  <button data-action="touche" data-valeur="entree" class="plein">↵ Entrée</button>
+
+  <h2>Son et médias</h2>
+  <div class="grille3">
+    <button data-action="volume" data-valeur="moins">🔉 −</button>
+    <button data-action="volume" data-valeur="muet" class="secondaire">🔇</button>
+    <button data-action="volume" data-valeur="plus">🔊 +</button>
+    <button data-action="media" data-valeur="precedent" class="secondaire">⏮</button>
+    <button data-action="media" data-valeur="lecture">⏯</button>
+    <button data-action="media" data-valeur="suivant" class="secondaire">⏭</button>
+  </div>
+
+  <h2>Diapositives</h2>
+  <div class="grille2">
+    <button data-action="touche" data-valeur="gauche" class="gros">◀ Précédente</button>
+    <button data-action="touche" data-valeur="droite" class="gros">Suivante ▶</button>
+  </div>
+  <div class="grille3">
+    <button data-action="touche" data-valeur="f5" class="secondaire">▶ Démarrer (F5)</button>
+    <button data-action="touche" data-valeur="noir" class="secondaire">⬛ Écran noir</button>
+    <button data-action="touche" data-valeur="echap" class="secondaire">✕ Quitter</button>
+  </div>
+</section>
+
+<section id="webcam" hidden>
+  <h2>Caméra du téléphone → webcam du PC</h2>
+  <p id="webcamHttps" class="avertissement" hidden>
+    La caméra exige une connexion sécurisée. Sur le PC, lancez <code>miroir webcam</code>
+    et scannez le nouveau code QR.
+  </p>
+  <div id="webcamCtrl">
+    <div class="grille2">
+      <label class="champ">Caméra
+        <select id="cameraSens"><option value="environment">Arrière</option><option value="user">Avant</option></select>
+      </label>
+      <label class="champ">Qualité
+        <select id="resolution">
+          <option value="640x480">640 × 480</option>
+          <option value="1280x720" selected>1280 × 720</option>
+          <option value="1920x1080">1920 × 1080</option>
+        </select>
+      </label>
+    </div>
+    <button id="webcamGo" class="plein">▶ Démarrer la webcam</button>
+    <video id="apercu" playsinline muted autoplay></video>
+    <p id="webcamInfo" class="petit"></p>
+  </div>
+</section>
+
+<section id="notifications" hidden>
+  <h2>Envoyer une notification au PC</h2>
+  <form id="formNotif">
+    <input id="notifTitre" placeholder="Titre" required>
+    <input id="notifTexte" placeholder="Message">
+    <button class="plein">🔔 Envoyer</button>
+  </form>
+  <p id="notifManque" class="avertissement" hidden>
+    Notifications du bureau indisponibles : installez <code>libnotify-bin</code> sur le PC
+    (elles s'affichent quand même dans le terminal).
+  </p>
+
+  <h2>Transférer toutes les notifications du téléphone</h2>
+  <p class="petit">
+    Une page web ne peut pas lire les notifications d'Android. Créez une macro dans une appli
+    d'automatisation (MacroDroid, Tasker, Automate…) :
+  </p>
+  <ol class="petit">
+    <li>Déclencheur : <b>Notification reçue</b> (toutes les applis, ou celles choisies).</li>
+    <li>Action : <b>Requête HTTP</b> <code>POST</code> vers l'adresse ci-dessous.</li>
+    <li>Corps (JSON) : <code>{"appli":"[app_name]","titre":"[notification_title]","texte":"[notification]"}</code></li>
+  </ol>
+  <code id="urlNotif" class="bloc"></code>
+  <button id="copierUrl" class="secondaire">📋 Copier l'adresse</button>
+  <p class="petit">Cette adresse contient votre clé secrète : ne la partagez pas.</p>
+</section>
+</main>
+
+<canvas id="toile" hidden></canvas>
+<script src="/pc/telephone.js"></script>
+</body>
+</html>

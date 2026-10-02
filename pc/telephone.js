@@ -245,6 +245,8 @@ setInterval(async () => {
 
 // ---------- webcam ----------
 let fluxCamera = null, webcamActive = false, verrouEcran = null;
+// Chaque démarrage a son numéro : une ancienne boucle encore en attente s'arrête d'elle-même.
+let sessionWebcam = 0;
 const apercu = $('apercu');
 const pause = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
@@ -266,11 +268,12 @@ async function demarrerWebcam() {
   webcamActive = true;
   $('webcamGo').textContent = '⏹ Arrêter la webcam';
   await verrouillerEcran();
-  boucleWebcam();
+  boucleWebcam(++sessionWebcam);
 }
 
 function arreterWebcam() {
   webcamActive = false;
+  sessionWebcam++;
   if (fluxCamera) fluxCamera.getTracks().forEach((p) => p.stop());
   fluxCamera = null;
   apercu.srcObject = null;
@@ -290,11 +293,12 @@ async function verrouillerEcran() {
   } catch (e) { /* facultatif */ }
 }
 
-async function boucleWebcam() {
+async function boucleWebcam(session) {
   const toile = $('toile');
   const ctx = toile.getContext('2d');
   let images = 0, t0 = performance.now();
-  while (webcamActive) {
+  const enCours = () => webcamActive && session === sessionWebcam;
+  while (enCours()) {
     const debut = performance.now();
     if (!apercu.videoWidth) { await pause(50); continue; }
     if (toile.width !== apercu.videoWidth || toile.height !== apercu.videoHeight) {
@@ -303,6 +307,7 @@ async function boucleWebcam() {
     }
     ctx.drawImage(apercu, 0, 0);
     const image = await new Promise((ok) => toile.toBlob(ok, 'image/jpeg', 0.75));
+    if (!enCours()) break;
     try {
       await api('/api/webcam', { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: image });
       images++;
@@ -314,6 +319,7 @@ async function boucleWebcam() {
     const ecoule = performance.now() - t0;
     if (ecoule > 1000) {
       const v4l2 = etat.webcam_v4l2 ? 'webcam ' + etat.webcam_v4l2 : 'flux ' + etat.url_webcam;
+      if (!enCours()) break;
       $('webcamInfo').textContent = `${toile.width}×${toile.height} · ${Math.round(images * 1000 / ecoule)} images/s · ${v4l2}`;
       images = 0; t0 = performance.now();
     }

@@ -14,8 +14,10 @@ Le téléphone et l'ordinateur doivent être sur le même réseau Wi-Fi.
 """
 
 import argparse
+import fcntl
 import getpass
 import glob
+import hashlib
 import hmac
 import html
 import json
@@ -466,18 +468,82 @@ def jeton_persistant(nouveau=False):
     return jeton
 
 
-def certificat():
-    """Certificat auto-signé pour le HTTPS (nécessaire pour la caméra du téléphone)."""
+def certificat(ip):
+    """Certificat HTTPS (nécessaire pour la caméra du téléphone).
+
+    Une autorité locale « Miroir » est créée une fois ; installée comme certificat de
+    confiance sur le téléphone, elle supprime l'avertissement. Elle signe un certificat
+    valable pour l'adresse IP du PC, refait si cette adresse change.
+    Renvoie (certificat, clé, autorité).
+    """
+    if not shutil.which("openssl"):
+        sys.exit("miroir: le HTTPS nécessite openssl (sudo apt install openssl)")
+    os.makedirs(CONFIG, mode=0o700, exist_ok=True)
+    ca, ca_cle = os.path.join(CONFIG, "ca.pem"), os.path.join(CONFIG, "ca-cle.pem")
     cert, cle = os.path.join(CONFIG, "cert.pem"), os.path.join(CONFIG, "cle.pem")
-    if not (os.path.exists(cert) and os.path.exists(cle)):
-        if not shutil.which("openssl"):
-            sys.exit("miroir: le HTTPS nécessite openssl (sudo apt install openssl)")
-        os.makedirs(CONFIG, mode=0o700, exist_ok=True)
-        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
-                        "-subj", "/CN=miroir", "-keyout", cle, "-out", cert],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    marque = os.path.join(CONFIG, "cert-ip.txt")
+
+    def openssl(*arguments):
+        subprocess.run(["openssl", *arguments], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # Verrou : deux commandes miroir lancées ensemble ne créent pas les certificats en même temps.
+    with open(os.path.join(CONFIG, "cert.verrou"), "w") as verrou:
+        fcntl.flock(verrou, fcntl.LOCK_EX)
+        return creer_certificats(openssl, ip, ca, ca_cle, cert, cle, marque)
+
+
+def creer_certificats(openssl, ip, ca, ca_cle, cert, cle, marque):
+    if not (os.path.exists(ca) and os.path.exists(ca_cle)):
+        openssl("req", "-utf8", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
+                "-subj", f"/CN=Miroir {socket.gethostname()} (autorité locale)",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                "-keyout", ca_cle, "-out", ca)
+        os.chmod(ca_cle, 0o600)
+        if os.path.exists(marque):
+            os.remove(marque)
+
+    ip_certifiee = open(marque).read().strip() if os.path.exists(marque) else ""
+    if ip_certifiee != ip or not (os.path.exists(cert) and os.path.exists(cle)):
+        demande, extensions = os.path.join(CONFIG, "cert.csr"), os.path.join(CONFIG, "cert.ext")
+        with open(extensions, "w") as f:
+            f.write(f"subjectAltName=IP:{ip},IP:127.0.0.1,DNS:localhost\n"
+                    "basicConstraints=critical,CA:FALSE\n"
+                    "keyUsage=critical,digitalSignature,keyEncipherment\n"
+                    "extendedKeyUsage=serverAuth\n")
+        openssl("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=miroir",
+                "-keyout", cle, "-out", demande)
+        # 825 jours : durée maximale acceptée par iOS pour un certificat de serveur.
+        openssl("x509", "-req", "-in", demande, "-CA", ca, "-CAkey", ca_cle, "-CAcreateserial",
+                "-days", "825", "-sha256", "-extfile", extensions, "-out", cert)
         os.chmod(cle, 0o600)
-    return cert, cle
+        os.remove(demande)
+        os.remove(extensions)
+        with open(marque, "w") as f:
+            f.write(ip)
+    return cert, cle, ca
+
+
+def ca_der(ca):
+    """L'autorité locale au format DER, que Android et iOS savent installer."""
+    with open(ca) as f:
+        return ssl.PEM_cert_to_DER_cert(f.read())
+
+
+def activer_https(serveur, ip):
+    """Passe le serveur en HTTPS et explique comment faire confiance au certificat."""
+    cert, cle, ca = certificat(ip)
+    contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    contexte.load_cert_chain(cert, cle)
+    serveur.socket = contexte.wrap_socket(serveur.socket, server_side=True,
+                                          do_handshake_on_connect=False)
+    der = ca_der(ca)
+    empreinte = hashlib.sha256(der).hexdigest().upper()
+    print(f"  Pour éviter l'avertissement HTTPS, installez une fois sur le téléphone l'autorité Miroir :\n"
+          f"    https://{ip}:{serveur.server_address[1]}/miroir-ca.crt\n"
+          f"    (empreinte SHA-256 {':'.join(empreinte[i:i + 2] for i in range(0, 16, 2))}…) — voir le README.")
+    return der
 
 
 def lister_partages(racines):
@@ -535,6 +601,7 @@ class Hub:
         v4l2 = args.v4l2 or peripherique_v4l2loopback()
         self.webcam = Webcam(v4l2 if v4l2 and shutil.which("ffmpeg") else None)
         self.textes = []
+        self.ca_der = None
 
     def notifier(self, titre, texte="", appli="Miroir"):
         print(f"  🔔 {appli} — {titre}" + (f" : {texte}" if texte else ""))
@@ -612,6 +679,9 @@ def gestionnaire_hub(hub):
             if chemin.startswith("/pc/") and chemin[4:] in FICHIERS_STATIQUES:
                 with open(os.path.join(DOSSIER_PAGES, chemin[4:]), "rb") as f:
                     return self.repondre(200, f.read(), FICHIERS_STATIQUES[chemin[4:]])
+            if chemin == "/miroir-ca.crt" and hub.ca_der:
+                return self.repondre(200, hub.ca_der, "application/x-x509-ca-cert",
+                                     [("Content-Disposition", 'attachment; filename="miroir-ca.crt"')])
             if chemin in ("/webcam.mjpg", "/webcam") and (self.local() or self.autorise()):
                 return self.flux_webcam() if chemin == "/webcam.mjpg" else self.repondre(
                     200, b"<!doctype html><title>Miroir webcam</title><body style='margin:0;background:#000'>"
@@ -794,10 +864,7 @@ def cmd_hub(args, onglet=""):
     hub = Hub(args, https)
     serveur = ServeurHub(("0.0.0.0", args.port), gestionnaire_hub(hub))
     if https:
-        contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        contexte.load_cert_chain(*certificat())
-        serveur.socket = contexte.wrap_socket(serveur.socket, server_side=True,
-                                              do_handshake_on_connect=False)
+        hub.ca_der = activer_https(serveur, ip_locale())
     base = f"{'https' if https else 'http'}://{ip_locale()}:{serveur.server_address[1]}"
     url = f"{base}/?t={hub.jeton}" + (f"#{onglet}" if onglet else "")
 
@@ -823,7 +890,7 @@ def cmd_hub(args, onglet=""):
         print(f"  {ok} webcam : flux {base}/webcam"
               " (pour une vraie webcam : sudo modprobe v4l2loopback exclusive_caps=1, et ffmpeg)")
     if https:
-        print("\n  Le certificat est auto-signé : sur le téléphone, acceptez l'avertissement"
+        print("\n  Sans l'autorité Miroir installée, acceptez l'avertissement sur le téléphone"
               " (« Paramètres avancés » → « Continuer »).")
     print("\n  Scannez ce QR pour vous connecter sans mot de passe "
           "(le lien reste valable ; « --nouveau-jeton » pour le révoquer) :")
@@ -955,27 +1022,49 @@ def cmd_qr(args):
 
 # ---------- tv : sert l'application web Miroir ----------
 
+FICHIERS_TV = {
+    "index.html": "text/html; charset=utf-8", "envoyer.html": "text/html; charset=utf-8",
+    "tv.js": "text/javascript", "envoyer.js": "text/javascript", "commun.js": "text/javascript",
+    "style.css": "text/css", "lib/peerjs.min.js": "text/javascript", "lib/qrcode.min.js": "text/javascript",
+}
+
+
 def cmd_tv(args):
-    class App(SimpleHTTPRequestHandler):
-        def __init__(self, *a, **k):
-            super().__init__(*a, directory=DOSSIER_APP, **k)
+    ca = {}
+
+    class App(BaseHTTPRequestHandler):
+        """Ne sert que les fichiers de l'application TV (jamais .git ni le reste du dossier)."""
 
         def log_message(self, *a):
             pass
 
+        def do_HEAD(self):
+            self.do_GET()
+
+        def do_GET(self):
+            chemin = urllib.parse.urlparse(self.path).path.lstrip("/") or "index.html"
+            if chemin == "miroir-ca.crt" and ca.get("der"):
+                corps, type_ = ca["der"], "application/x-x509-ca-cert"
+            elif chemin in FICHIERS_TV:
+                with open(os.path.join(DOSSIER_APP, chemin), "rb") as f:
+                    corps, type_ = f.read(), FICHIERS_TV[chemin]
+            else:
+                return self.send_error(404)
+            self.send_response(200)
+            self.send_header("Content-Type", type_)
+            self.send_header("Content-Length", str(len(corps)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(corps)
+
     serveur = ServeurHub(("0.0.0.0", args.port), App)
-    if args.https:
-        contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        contexte.load_cert_chain(*certificat())
-        serveur.socket = contexte.wrap_socket(serveur.socket, server_side=True,
-                                              do_handshake_on_connect=False)
     schema = "https" if args.https else "http"
     url = f"{schema}://{ip_locale()}:{serveur.server_address[1]}/index.html"
     if args.signal:
         url += "?signal=" + urllib.parse.quote(args.signal, safe="")
     print("Écran TV de Miroir. Ouvrez cette adresse dans le navigateur de la TV :")
     if args.https:
-        print("  Certificat auto-signé : acceptez l'avertissement sur la TV et sur le téléphone.")
+        ca["der"] = activer_https(serveur, ip_locale())
     else:
         print("  \033[33m✗\033[0m En HTTP, le téléphone ne peut envoyer que des fichiers : la caméra et le\n"
               "    partage d'écran exigent HTTPS (« miroir tv --https »).")

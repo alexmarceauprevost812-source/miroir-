@@ -87,6 +87,21 @@ sudo modprobe v4l2loopback exclusive_caps=1 card_label="Miroir"   # une fois
 miroir webcam        # HTTPS : acceptez l'avertissement du certificat sur le téléphone
 ```
 
+**Faire confiance au HTTPS (une seule fois)** : `miroir` crée une autorité locale
+« Miroir » (`~/.config/miroir/ca.pem`) et un certificat pour l'adresse IP du PC,
+refait automatiquement si l'IP change. Sans elle, il faut accepter un avertissement
+à chaque fois, et certains navigateurs refusent alors la caméra. Ouvrez
+`https://IP-DU-PC:8443/miroir-ca.crt` sur le téléphone (lien aussi dans l'onglet
+📷), puis :
+
+- **Android** : Paramètres → Sécurité → Chiffrement et identifiants → Installer un
+  certificat → Certificat CA → choisir `miroir-ca.crt`.
+- **iPhone** (dans Safari) : Réglages → Profil téléchargé → Installer, puis Réglages →
+  Général → Informations → Réglages des certificats → activer « Miroir ».
+
+Vérifiez que l'empreinte affichée dans le terminal correspond. Ne partagez jamais
+`~/.config/miroir/ca-cle.pem`.
+
 La caméra apparaît comme webcam dans Zoom, Meet, OBS… Sans v4l2loopback, l'image
 reste visible sur `https://localhost:8443/webcam` (utilisable comme source dans OBS).
 

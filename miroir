@@ -826,7 +826,9 @@ def gestionnaire_hub(hub):
                 try:
                     d = json.loads(brut or b"{}")
                 except ValueError:
-                    d = {}
+                    d = None
+                if not isinstance(d, dict):
+                    return self.json({"ok": False, "erreur": "JSON attendu : un objet {titre, texte, appli}"}, 400)
             else:
                 d = {"texte": brut.decode("utf-8", "replace")}
             titre = str(d.get("titre") or d.get("title") or "Téléphone")

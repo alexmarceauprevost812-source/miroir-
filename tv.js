@@ -93,11 +93,19 @@ function taille(o) {
 const TAILLE_MAX_FICHIER = 512 * 1024 * 1024;
 const TAILLE_MAX_TOTALE = 1024 * 1024 * 1024;
 const NOMBRE_MAX_FICHIERS = 30;
+// Octets annoncés par les réceptions en cours, tous téléphones confondus : ils comptent
+// dans la limite totale dès le début de l'envoi, pas seulement une fois le fichier reçu.
+let octetsReserves = 0;
 
 function recevoirFichiers(conn) {
   const enCours = {};
-  const refuser = (id, raison) => {
+  const liberer = (id) => {
+    if (!enCours[id]) return;
+    octetsReserves -= enCours[id].taille;
     delete enCours[id];
+  };
+  const refuser = (id, raison) => {
+    liberer(id);
     $('reception').hidden = true;
     conn.send({ t: 'refus', id, raison });
   };
@@ -107,7 +115,13 @@ function recevoirFichiers(conn) {
       if (!(m.taille >= 0) || m.taille > TAILLE_MAX_FICHIER) {
         return refuser(m.id, 'fichier trop gros pour la TV (max ' + taille(TAILLE_MAX_FICHIER) + ')');
       }
+      if (enCours[m.id]) return refuser(m.id, 'envoi déjà en cours');
+      if (octetsReserves + m.taille > TAILLE_MAX_TOTALE) {
+        return refuser(m.id, 'TV occupée par d\'autres envois, réessayez plus tard');
+      }
+      octetsReserves += m.taille;
       enCours[m.id] = { nom: m.nom, mime: m.mime, taille: m.taille, morceaux: [], recu: 0 };
+      oublierAnciens(0);
     } else if (m.t === 'morceau' && enCours[m.id]) {
       const f = enCours[m.id];
       if (f.recu + m.d.byteLength > f.taille) return refuser(m.id, 'taille annoncée dépassée');
@@ -118,7 +132,7 @@ function recevoirFichiers(conn) {
       $('reception').textContent = '⬇ ' + f.nom + ' — ' + pct + ' %';
     } else if (m.t === 'fin' && enCours[m.id]) {
       const f = enCours[m.id];
-      delete enCours[m.id];
+      liberer(m.id);
       $('reception').hidden = true;
       if (f.recu !== f.taille) return conn.send({ t: 'refus', id: m.id, raison: 'fichier incomplet' });
       ajouterRecu(new Blob(f.morceaux, { type: f.mime || 'application/octet-stream' }), f.nom);
@@ -126,7 +140,10 @@ function recevoirFichiers(conn) {
       conn.send({ t: 'recu', id: m.id });
     }
   });
-  conn.on('close', () => { $('reception').hidden = true; });
+  conn.on('close', () => {
+    for (const id of Object.keys(enCours)) liberer(id);
+    $('reception').hidden = true;
+  });
 }
 
 function ajouterRecu(blob, nom) {
@@ -144,10 +161,12 @@ function ajouterRecu(blob, nom) {
   afficherFichier(recus.indexOf(fichier));
 }
 
-// Libère la mémoire des fichiers les plus anciens au-delà des limites.
-function oublierAnciens() {
+// Libère la mémoire des fichiers les plus anciens au-delà des limites (réceptions en
+// cours comprises). « garder » : nombre de fichiers récents à conserver quoi qu'il arrive.
+function oublierAnciens(garder = 1) {
   let total = recus.reduce((t, f) => t + f.taille, 0);
-  while (recus.length > 1 && (recus.length > NOMBRE_MAX_FICHIERS || total > TAILLE_MAX_TOTALE)) {
+  while (recus.length > garder
+         && (recus.length > NOMBRE_MAX_FICHIERS || total + octetsReserves > TAILLE_MAX_TOTALE)) {
     const ancien = recus.shift();
     total -= ancien.taille;
     if (indexAffiche === 0) fermerVisionneuse();

@@ -88,14 +88,29 @@ function taille(o) {
   return (o / 1073741824).toFixed(2) + ' Go';
 }
 
+// Limites pour ne pas saturer la mémoire d'une TV : taille par fichier, et les plus
+// anciens fichiers reçus sont oubliés au-delà d'un total ou d'un nombre.
+const TAILLE_MAX_FICHIER = 512 * 1024 * 1024;
+const TAILLE_MAX_TOTALE = 1024 * 1024 * 1024;
+const NOMBRE_MAX_FICHIERS = 30;
+
 function recevoirFichiers(conn) {
   const enCours = {};
+  const refuser = (id, raison) => {
+    delete enCours[id];
+    $('reception').hidden = true;
+    conn.send({ t: 'refus', id, raison });
+  };
   conn.on('data', (m) => {
     if (!m || !m.t) return;
     if (m.t === 'debut') {
+      if (!(m.taille >= 0) || m.taille > TAILLE_MAX_FICHIER) {
+        return refuser(m.id, 'fichier trop gros pour la TV (max ' + taille(TAILLE_MAX_FICHIER) + ')');
+      }
       enCours[m.id] = { nom: m.nom, mime: m.mime, taille: m.taille, morceaux: [], recu: 0 };
     } else if (m.t === 'morceau' && enCours[m.id]) {
       const f = enCours[m.id];
+      if (f.recu + m.d.byteLength > f.taille) return refuser(m.id, 'taille annoncée dépassée');
       f.morceaux.push(m.d);
       f.recu += m.d.byteLength;
       const pct = f.taille ? Math.round((f.recu / f.taille) * 100) : 100;
@@ -105,7 +120,10 @@ function recevoirFichiers(conn) {
       const f = enCours[m.id];
       delete enCours[m.id];
       $('reception').hidden = true;
+      if (f.recu !== f.taille) return conn.send({ t: 'refus', id: m.id, raison: 'fichier incomplet' });
       ajouterRecu(new Blob(f.morceaux, { type: f.mime || 'application/octet-stream' }), f.nom);
+      // Accusé de réception : le téléphone n'annonce le succès qu'après ce message.
+      conn.send({ t: 'recu', id: m.id });
     }
   });
   conn.on('close', () => { $('reception').hidden = true; });
@@ -114,15 +132,29 @@ function recevoirFichiers(conn) {
 function ajouterRecu(blob, nom) {
   const fichier = { nom, blob, type: blob.type, url: URL.createObjectURL(blob), taille: blob.size };
   recus.push(fichier);
-  const i = recus.length - 1;
   const li = document.createElement('li');
   const b = document.createElement('button');
   b.textContent = nom + ' (' + taille(blob.size) + ')';
-  b.addEventListener('click', () => afficherFichier(i));
+  b.addEventListener('click', () => afficherFichier(recus.indexOf(fichier)));
   li.appendChild(b);
+  fichier.li = li;
   $('listeRecus').prepend(li);
   $('recus').hidden = false;
-  afficherFichier(i);
+  oublierAnciens();
+  afficherFichier(recus.indexOf(fichier));
+}
+
+// Libère la mémoire des fichiers les plus anciens au-delà des limites.
+function oublierAnciens() {
+  let total = recus.reduce((t, f) => t + f.taille, 0);
+  while (recus.length > 1 && (recus.length > NOMBRE_MAX_FICHIERS || total > TAILLE_MAX_TOTALE)) {
+    const ancien = recus.shift();
+    total -= ancien.taille;
+    if (indexAffiche === 0) fermerVisionneuse();
+    indexAffiche--;
+    ancien.li.remove();
+    URL.revokeObjectURL(ancien.url);
+  }
 }
 
 function afficherFichier(i) {

@@ -112,6 +112,14 @@ def taille(o):
         o /= 1024
 
 
+def chemin_protege(gestionnaire, jeton):
+    """Partie de l'adresse après /<jeton>/, ou None si le jeton est absent ou faux."""
+    morceaux = urllib.parse.urlparse(gestionnaire.path).path.split("/", 2)
+    if len(morceaux) < 2 or not hmac.compare_digest(morceaux[1].encode(), jeton.encode()):
+        return None
+    return morceaux[2] if len(morceaux) > 2 else ""
+
+
 def lancer(gestionnaire, port, chemin=""):
     serveur = ThreadingHTTPServer(("0.0.0.0", port), gestionnaire)
     url = f"http://{ip_locale()}:{serveur.server_address[1]}/{chemin}"
@@ -188,22 +196,28 @@ def cmd_envoyer(args):
     if not fichiers:
         sys.exit("miroir: aucun fichier à envoyer")
 
+    # Clé secrète dans l'adresse : seul celui qui a scanné le QR peut télécharger.
+    jeton = secrets.token_urlsafe(16)
+
     class Envoi(SimpleHTTPRequestHandler):
         def log_message(self, *a):
             pass
 
         def do_GET(self):
-            if self.path in ("/", "/index.html"):
+            chemin = chemin_protege(self, jeton)
+            if chemin is None:
+                return self.send_error(404)
+            if chemin in ("", "index.html"):
                 liens = "".join(
-                    f'<a href="/f/{i}">⬇ {html.escape(os.path.basename(f))} '
+                    f'<a href="f/{i}">⬇ {html.escape(os.path.basename(f))} '
                     f"<small>({taille(os.path.getsize(f))})</small></a>"
                     for i, f in enumerate(fichiers))
                 corps = f"<!doctype html><meta charset=utf-8><title>Miroir</title>{STYLE}" \
                         f"<h1>Miroir — fichiers partagés</h1>{liens}"
                 self.envoyer_texte(corps)
-            elif self.path.startswith("/f/"):
+            elif chemin.startswith("f/"):
                 try:
-                    f = fichiers[int(self.path[3:])]
+                    f = fichiers[int(chemin[2:])]
                 except (ValueError, IndexError):
                     return self.send_error(404)
                 envoyer_fichier(self, f)
@@ -220,7 +234,7 @@ def cmd_envoyer(args):
             self.wfile.write(donnees)
 
     print(f"Partage de {len(fichiers)} fichier(s).")
-    lancer(Envoi, args.port)
+    lancer(Envoi, args.port, jeton + "/")
 
 
 def envoyer_fichier(gestionnaire, chemin):
@@ -250,7 +264,7 @@ f.onchange = async () => {
     l.prepend(li);
     await new Promise((ok) => {
       const r = new XMLHttpRequest();
-      r.open('PUT', '/envoi?nom=' + encodeURIComponent(x.name));
+      r.open('PUT', 'envoi?nom=' + encodeURIComponent(x.name));
       r.upload.onprogress = (e) => { li.lastChild.value = e.loaded / e.total; };
       r.onload = () => { li.firstChild.textContent += r.status === 200 ? ' ✅' : ' ❌'; ok(); };
       r.onerror = () => { li.firstChild.textContent += ' ❌'; ok(); };
@@ -266,11 +280,16 @@ def cmd_recevoir(args):
     dossier = os.path.abspath(args.dossier)
     os.makedirs(dossier, exist_ok=True)
 
+    # Clé secrète dans l'adresse : seul celui qui a scanné le QR peut déposer des fichiers.
+    jeton = secrets.token_urlsafe(16)
+
     class Reception(SimpleHTTPRequestHandler):
         def log_message(self, *a):
             pass
 
         def do_GET(self):
+            if chemin_protege(self, jeton) not in ("", "index.html"):
+                return self.send_error(404)
             donnees = PAGE_RECEVOIR.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -279,9 +298,9 @@ def cmd_recevoir(args):
             self.wfile.write(donnees)
 
         def do_PUT(self):
-            url = urllib.parse.urlparse(self.path)
-            if url.path != "/envoi":
+            if chemin_protege(self, jeton) != "envoi":
                 return self.send_error(404)
+            url = urllib.parse.urlparse(self.path)
             nom = urllib.parse.parse_qs(url.query).get("nom", ["fichier"])[0]
             chemin = recevoir_corps(self, dossier, nom)
             if not chemin:
@@ -292,7 +311,7 @@ def cmd_recevoir(args):
             self.end_headers()
 
     print(f"Les fichiers reçus seront enregistrés dans : {dossier}")
-    lancer(Reception, args.port)
+    lancer(Reception, args.port, jeton + "/")
 
 
 # ---------- hub : les outils du bureau Linux ----------
@@ -608,7 +627,6 @@ class Hub:
         self.notify = shutil.which("notify-send")
         v4l2 = args.v4l2 or peripherique_v4l2loopback()
         self.webcam = Webcam(v4l2 if v4l2 and shutil.which("ffmpeg") else None)
-        self.textes = []
         self.ca_der = None
 
     def notifier(self, titre, texte="", appli="Miroir"):
@@ -786,7 +804,6 @@ def gestionnaire_hub(hub):
             action = donnees.get("action")
             if not texte:
                 return self.json({"ok": False, "erreur": "texte vide"}, 400)
-            hub.textes.append(texte)
             if action == "ouvrir":
                 lien = urllib.parse.urlparse(texte)
                 if lien.scheme not in ("http", "https") or not lien.netloc:

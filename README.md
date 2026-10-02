@@ -19,7 +19,8 @@ Depuis le téléphone vous pouvez :
 | 📷 Partager la caméra | la caméra arrière en direct |
 | 📁 Envoyer des fichiers | photos, vidéos, musique, PDF, texte… ; les autres types peuvent être téléchargés sur la TV |
 
-Sur la TV, les fichiers reçus apparaissent dans « Fichiers reçus » ; ◀ ▶ pour
+Sur la TV, les fichiers reçus (512 Mo maximum chacun ; au-delà de 30 fichiers ou
+1 Go, les plus anciens sont oubliés) apparaissent dans « Fichiers reçus » ; ◀ ▶ pour
 naviguer, « Télécharger » pour les garder, Échap / Retour pour fermer.
 
 La connexion est directe entre le téléphone et la TV (WebRTC). Le serveur public
@@ -117,6 +118,9 @@ avec le corps `{"appli":"…","titre":"…","texte":"…"}`. Pour une intégrati
 miroir envoyer photo.jpg film.mp4 Documents/   # Linux -> téléphone
 miroir recevoir -d ~/Images                    # téléphone -> Linux
 ```
+
+L'adresse du QR contient une clé secrète, nouvelle à chaque lancement : sans elle,
+personne d'autre sur le Wi-Fi ne peut télécharger ni déposer de fichiers.
 
 ### `miroir wifi` : connecter un invité sans taper le mot de passe
 

@@ -76,6 +76,8 @@ const TAILLE_MORCEAU = 64 * 1024;
 const TAMPON_MAX = 4 * 1024 * 1024;
 let connexion = null;
 let fileEnvoi = Promise.resolve();
+// Envois en attente de l'accusé de réception de la TV : id -> { ok, echec }.
+const attentes = new Map();
 
 function ouvrirConnexion(code) {
   if (connexion && connexion.open && connexion.peer === PREFIXE + code) return Promise.resolve(connexion);
@@ -84,7 +86,16 @@ function ouvrirConnexion(code) {
     const c = peer.connect(PREFIXE + code, { reliable: true });
     c.on('open', () => { connexion = c; ok(c); });
     c.on('error', echec);
-    c.on('close', () => { if (connexion === c) connexion = null; });
+    c.on('data', (m) => {
+      const attente = m && attentes.get(m.id);
+      if (!attente) return;
+      if (m.t === 'recu') attente.ok();
+      else if (m.t === 'refus') attente.echec(new Error(m.raison || 'refusé par la TV'));
+    });
+    c.on('close', () => {
+      if (connexion === c) connexion = null;
+      for (const attente of attentes.values()) attente.echec(new Error('connexion fermée'));
+    });
     setTimeout(() => echec(new Error('délai dépassé')), 15000);
   });
 }
@@ -111,14 +122,29 @@ async function envoyerFichier(fichier, ligne) {
   const code = champCode.value.trim().toUpperCase();
   const c = await ouvrirConnexion(code);
   const id = Math.random().toString(36).slice(2);
-  c.send({ t: 'debut', id, nom: fichier.name, mime: fichier.type, taille: fichier.size });
-  for (let pos = 0; pos < fichier.size; pos += TAILLE_MORCEAU) {
-    const morceau = await fichier.slice(pos, pos + TAILLE_MORCEAU).arrayBuffer();
-    await attendreTampon(c);
-    c.send({ t: 'morceau', id, d: morceau });
-    ligne.querySelector('progress').value = Math.min(1, (pos + TAILLE_MORCEAU) / fichier.size);
+  // Réussi seulement quand la TV confirme avoir tout reçu (ou échec : refus, coupure, délai).
+  let refus = null;
+  const accuse = new Promise((ok, echec) => {
+    attentes.set(id, { ok, echec: (e) => { refus = e; echec(e); } });
+  });
+  accuse.catch(() => {});
+  try {
+    c.send({ t: 'debut', id, nom: fichier.name, mime: fichier.type, taille: fichier.size });
+    for (let pos = 0; pos < fichier.size; pos += TAILLE_MORCEAU) {
+      const morceau = await fichier.slice(pos, pos + TAILLE_MORCEAU).arrayBuffer();
+      await attendreTampon(c);
+      if (refus) throw refus;
+      c.send({ t: 'morceau', id, d: morceau });
+      ligne.querySelector('progress').value = Math.min(1, (pos + TAILLE_MORCEAU) / fichier.size);
+    }
+    c.send({ t: 'fin', id });
+    let minuteur;
+    await Promise.race([accuse, new Promise((ok, echec) => {
+      minuteur = setTimeout(() => echec(new Error('pas de confirmation de la TV')), 120000);
+    })]).finally(() => clearTimeout(minuteur));
+  } finally {
+    attentes.delete(id);
   }
-  c.send({ t: 'fin', id });
 }
 
 $('fichier').addEventListener('change', (ev) => {
@@ -135,6 +161,6 @@ $('fichier').addEventListener('change', (ev) => {
     fileEnvoi = fileEnvoi
       .then(() => envoyerFichier(fichier, ligne))
       .then(() => { ligne.classList.add('ok'); etat('✅ Fichier envoyé à la TV'); })
-      .catch(() => { ligne.classList.add('erreur'); etat('Échec de l\'envoi. Vérifiez le code de la TV.'); });
+      .catch((e) => { ligne.classList.add('erreur'); etat('Échec de l\'envoi : ' + e.message); });
   }
 });

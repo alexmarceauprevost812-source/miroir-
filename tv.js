@@ -112,7 +112,7 @@ function recevoirFichiers(conn) {
 }
 
 function ajouterRecu(blob, nom) {
-  const fichier = { nom, type: blob.type, url: URL.createObjectURL(blob), taille: blob.size };
+  const fichier = { nom, blob, type: blob.type, url: URL.createObjectURL(blob), taille: blob.size };
   recus.push(fichier);
   const i = recus.length - 1;
   const li = document.createElement('li');
@@ -142,9 +142,14 @@ function afficherFichier(i) {
     el.controls = true;
     el.autoplay = true;
     el.playsInline = true;
-  } else if (type === 'application/pdf' || type.startsWith('text/') || type === 'application/json') {
+  } else if (type === 'application/pdf') {
+    // Le Blob a le type PDF : le navigateur l'ouvre avec sa visionneuse PDF, jamais comme du HTML.
     el = document.createElement('iframe');
     el.src = f.url;
+  } else if (type.startsWith('text/') || type === 'application/json') {
+    // Texte (y compris HTML ou SVG) affiché tel quel, jamais interprété : aucun script ne s'exécute.
+    el = document.createElement('pre');
+    f.blob.slice(0, 1 << 20).text().then((t) => { el.textContent = t; });
   } else {
     el = document.createElement('div');
     el.className = 'autre';

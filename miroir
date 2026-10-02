@@ -121,22 +121,29 @@ def lancer(gestionnaire, port, chemin=""):
     return url
 
 
-def nom_libre(dossier, nom):
-    """Nom de fichier sûr (sans chemin) qui n'écrase rien dans le dossier."""
+def creer_fichier_libre(dossier, nom):
+    """Crée un fichier au nom sûr (sans chemin) qui n'écrase rien dans le dossier.
+
+    La création exclusive (O_EXCL) réserve le nom : deux envois simultanés du même
+    fichier obtiennent chacun le leur. Renvoie (chemin, fichier ouvert en écriture).
+    """
     nom = os.path.basename(nom.replace("\\", "/")).strip().lstrip(".") or "fichier"
     base, ext = os.path.splitext(nom)
     chemin, n = os.path.join(dossier, nom), 1
-    while os.path.exists(chemin):
-        chemin = os.path.join(dossier, f"{base} ({n}){ext}")
-        n += 1
-    return chemin
+    while True:
+        try:
+            fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            return chemin, os.fdopen(fd, "wb")
+        except FileExistsError:
+            chemin = os.path.join(dossier, f"{base} ({n}){ext}")
+            n += 1
 
 
 def recevoir_corps(gestionnaire, dossier, nom):
     """Écrit le corps de la requête dans le dossier. Renvoie le chemin, ou None si incomplet."""
     reste = int(gestionnaire.headers.get("Content-Length", 0))
-    chemin = nom_libre(dossier, nom)
-    with open(chemin, "wb") as sortie:
+    chemin, sortie = creer_fichier_libre(dossier, nom)
+    with sortie:
         while reste > 0:
             bloc = gestionnaire.rfile.read(min(reste, 1 << 20))
             if not bloc:

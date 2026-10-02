@@ -226,8 +226,14 @@ def cmd_envoyer(args):
     fichiers = []
     for chemin in args.fichiers:
         if os.path.isdir(chemin):
+            # Seuls les vrais fichiers du dossier : pas de lien symbolique qui en sort.
+            base = os.path.realpath(chemin)
             for racine, _, noms in os.walk(chemin):
-                fichiers += [os.path.join(racine, n) for n in sorted(noms)]
+                for n in sorted(noms):
+                    f = os.path.join(racine, n)
+                    reel = os.path.realpath(f)
+                    if os.path.commonpath([reel, base]) == base and os.path.isfile(reel):
+                        fichiers.append(f)
         elif os.path.isfile(chemin):
             fichiers.append(chemin)
         else:
@@ -368,8 +374,21 @@ class PressePapiers:
         else:
             self.outil = None
 
+    # Messages des outils quand le presse-papiers est simplement vide (ce n'est pas une panne).
+    VIDE = ("nothing is copied", "no selection", "not available", "no suitable type")
+
     def lire(self):
-        return executer(self.lire_cmd, sortie=True).decode("utf-8", "replace") if self.outil else ""
+        """Texte du presse-papiers, "" s'il est vide, None si la lecture a échoué."""
+        if not self.outil:
+            return None
+        try:
+            r = subprocess.run(self.lire_cmd, capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode != 0:
+            erreur = r.stderr.decode("utf-8", "replace").lower()
+            return "" if any(m in erreur for m in self.VIDE) else None
+        return r.stdout.decode("utf-8", "replace")
 
     def ecrire(self, texte):
         return bool(self.outil) and executer(self.ecrire_cmd, entree=texte.encode())
@@ -776,7 +795,10 @@ def gestionnaire_hub(hub):
                 print(f"  ⬇ téléchargé par le téléphone : {os.path.basename(fichier)}")
                 return
             if chemin == "/api/presse-papiers":
-                return self.json({"texte": hub.presse_papiers.lire()})
+                texte = hub.presse_papiers.lire()
+                if texte is None:
+                    return self.json({"ok": False, "erreur": "Presse-papiers du PC inaccessible"}, 502)
+                return self.json({"texte": texte})
             self.json({"erreur": "introuvable"}, 404)
 
         def do_POST(self):

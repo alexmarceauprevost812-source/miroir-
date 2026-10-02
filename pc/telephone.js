@@ -255,20 +255,28 @@ if (!window.isSecureContext || !navigator.mediaDevices) {
   $('webcamCtrl').hidden = true;
 }
 
+// Bouton désactivé pendant le démarrage : un second appui n'ouvre pas une seconde caméra.
 async function demarrerWebcam() {
-  const [l, h] = $('resolution').value.split('x').map(Number);
+  const bouton = $('webcamGo');
+  if (bouton.disabled) return;
+  bouton.disabled = true;
   try {
-    fluxCamera = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: $('cameraSens').value, width: { ideal: l }, height: { ideal: h } }, audio: false,
-    });
-  } catch (e) { return message('Accès à la caméra refusé', true); }
-  apercu.srcObject = fluxCamera;
-  apercu.classList.add('actif');
-  await apercu.play().catch(() => {});
-  webcamActive = true;
-  $('webcamGo').textContent = '⏹ Arrêter la webcam';
-  await verrouillerEcran();
-  boucleWebcam(++sessionWebcam);
+    const [l, h] = $('resolution').value.split('x').map(Number);
+    try {
+      fluxCamera = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: $('cameraSens').value, width: { ideal: l }, height: { ideal: h } }, audio: false,
+      });
+    } catch (e) { return message('Accès à la caméra refusé', true); }
+    apercu.srcObject = fluxCamera;
+    apercu.classList.add('actif');
+    await apercu.play().catch(() => {});
+    webcamActive = true;
+    bouton.textContent = '⏹ Arrêter la webcam';
+    await verrouillerEcran();
+    boucleWebcam(++sessionWebcam);
+  } finally {
+    bouton.disabled = false;
+  }
 }
 
 function arreterWebcam() {
@@ -288,6 +296,8 @@ function arreterWebcam() {
 async function verrouillerEcran() {
   try {
     const verrou = await navigator.wakeLock.request('screen');
+    // Webcam arrêtée ou verrou déjà obtenu pendant l'attente : on ne garde pas celui-ci.
+    if (!webcamActive || verrouEcran) return void verrou.release().catch(() => {});
     verrou.addEventListener('release', () => { if (verrouEcran === verrou) verrouEcran = null; });
     verrouEcran = verrou;
   } catch (e) { /* facultatif */ }

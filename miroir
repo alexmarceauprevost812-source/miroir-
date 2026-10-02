@@ -494,7 +494,15 @@ def certificat(ip):
 
 
 def creer_certificats(openssl, ip, ca, ca_cle, cert, cle, marque):
-    if not (os.path.exists(ca) and os.path.exists(ca_cle)):
+    def expire_bientot(certificat_pem):
+        """Vrai si le certificat expire dans moins de 30 jours (ou est illisible)."""
+        return subprocess.run(["openssl", "x509", "-checkend", str(30 * 86400), "-noout",
+                               "-in", certificat_pem], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode != 0
+
+    if not (os.path.exists(ca) and os.path.exists(ca_cle)) or expire_bientot(ca):
+        if os.path.exists(ca):
+            print("  L'autorité Miroir expire : une nouvelle est créée, réinstallez-la sur le téléphone.")
         openssl("req", "-utf8", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
                 "-subj", f"/CN=Miroir {socket.gethostname()} (autorité locale)",
                 "-addext", "basicConstraints=critical,CA:TRUE",
@@ -505,7 +513,7 @@ def creer_certificats(openssl, ip, ca, ca_cle, cert, cle, marque):
             os.remove(marque)
 
     ip_certifiee = open(marque).read().strip() if os.path.exists(marque) else ""
-    if ip_certifiee != ip or not (os.path.exists(cert) and os.path.exists(cle)):
+    if ip_certifiee != ip or not (os.path.exists(cert) and os.path.exists(cle)) or expire_bientot(cert):
         demande, extensions = os.path.join(CONFIG, "cert.csr"), os.path.join(CONFIG, "cert.ext")
         with open(extensions, "w") as f:
             f.write(f"subjectAltName=IP:{ip},IP:127.0.0.1,DNS:localhost\n"
@@ -729,9 +737,11 @@ def gestionnaire_hub(hub):
                 return self.json({"erreur": "requête trop grande"}, 413)
             if chemin == "/api/presse-papiers":
                 texte = str(donnees.get("texte", ""))
-                ok = hub.presse_papiers.ecrire(texte)
+                if not hub.presse_papiers.ecrire(texte):
+                    print("  ✗ presse-papiers du PC inaccessible")
+                    return self.json({"ok": False, "erreur": "Presse-papiers du PC inaccessible"}, 502)
                 print(f"  📋 copié sur le PC : {texte[:80]!r}")
-                return self.json({"ok": ok})
+                return self.json({"ok": True})
             if chemin == "/api/texte":
                 return self.texte(donnees)
             if chemin == "/api/controle":
